@@ -370,6 +370,10 @@ void TrackListWidget::contextMenuEvent(QContextMenuEvent *event) {
     // Appearance::setActionIcon(octaveDownAction, ":/run_environment/graphics/tool/transpose_down.png");
 
     QAction *explodeAction = menu.addAction(tr("Explode Chords to Tracks"));
+    QMenu *voiceFilterMenu = menu.addMenu(tr("Chord Voice Filter (FFXIV)"));
+    QAction *voiceHighAction = voiceFilterMenu->addAction(tr("Keep Highest Note per Chord"));
+    QAction *voiceLowAction = voiceFilterMenu->addAction(tr("Keep Lowest Note per Chord"));
+    QAction *voiceInnerAction = voiceFilterMenu->addAction(tr("Keep Inner Notes (Remove Outer Voices)"));
     QAction *splitAction = menu.addAction(tr("Split Channels to Tracks"));
 
     menu.addSeparator();
@@ -412,6 +416,12 @@ void TrackListWidget::contextMenuEvent(QContextMenuEvent *event) {
         emit transposeTrackOctaveDownRequested(track);
     } else if (selectedAction == explodeAction) {
         emit explodeTrackChordsRequested(track);
+    } else if (selectedAction == voiceHighAction) {
+        emit filterTrackChordVoicesRequested(track, 0);
+    } else if (selectedAction == voiceLowAction) {
+        emit filterTrackChordVoicesRequested(track, 1);
+    } else if (selectedAction == voiceInnerAction) {
+        emit filterTrackChordVoicesRequested(track, 2);
     } else if (selectedAction == splitAction) {
         emit splitTrackChannelsRequested(track);
     } else if (selectedAction == selectAllAction) {

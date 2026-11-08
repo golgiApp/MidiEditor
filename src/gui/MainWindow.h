@@ -563,6 +563,9 @@ public slots:
     void transposeTrackOctaveUp(MidiTrack *track);
     void transposeTrackOctaveDown(MidiTrack *track);
     void explodeTrackChords(MidiTrack *track);
+
+    /** Run a chord voice filter on all notes in a track (from track context menu). */
+    void filterTrackChordVoices(MidiTrack *track, int mode);
     void splitTrackChannels(MidiTrack *track);
     void selectTrackEvents(MidiTrack *track);
     void clearTrackEvents(MidiTrack *track);
@@ -580,6 +583,12 @@ public slots:
      * \brief Explodes chords into separate tracks based on chosen strategy.
      */
     void explodeChordsToTracks(MidiTrack *sourceTrack = nullptr);
+
+    /** Process selected notes; if track is supplied, process the whole track. */
+    void filterChordVoices(int mode, MidiTrack *track = nullptr);
+
+    /** Configure the maximum difference in onset ticks for a chord group. */
+    void setChordVoiceTolerance();
 
     /**
      * \brief Splits a multi-channel track into one track per channel.

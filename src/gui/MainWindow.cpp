@@ -69,6 +69,11 @@
 #include "GameSupportSettingsWidget.h"
 #include "FFXIVFixerDialog.h"
 #include "../support/FFXIVChannelFixer.h"
+#include "../support/ChordVoiceFilter.h"
+
+#include <cstdint>
+#include <set>
+#include <vector>
 #include "OpenGLMatrixWidget.h"
 #include "OpenGLMiscWidget.h"
 #include "MiscWidget.h"
@@ -552,6 +557,8 @@ MainWindow::MainWindow(QString initFile)
     connect(_trackWidget, SIGNAL(transposeTrackOctaveUpRequested(MidiTrack*)), this, SLOT(transposeTrackOctaveUp(MidiTrack*)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(transposeTrackOctaveDownRequested(MidiTrack*)), this, SLOT(transposeTrackOctaveDown(MidiTrack*)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(explodeTrackChordsRequested(MidiTrack*)), this, SLOT(explodeTrackChords(MidiTrack*)), Qt::QueuedConnection);
+    connect(_trackWidget, &TrackListWidget::filterTrackChordVoicesRequested,
+            this, &MainWindow::filterTrackChordVoices, Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(splitTrackChannelsRequested(MidiTrack*)), this, SLOT(splitTrackChannels(MidiTrack*)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(selectTrackEventsRequested(MidiTrack*)), this, SLOT(selectTrackEvents(MidiTrack*)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(clearTrackEventsRequested(MidiTrack*)), this, SLOT(clearTrackEvents(MidiTrack*)), Qt::QueuedConnection);
@@ -1851,6 +1858,102 @@ void MainWindow::glueAllChannels() {
     // Always ignore channels
     glueTool.performGlueOperation(false);
     updateAll();
+}
+
+void MainWindow::filterTrackChordVoices(MidiTrack *track, int mode) {
+    filterChordVoices(mode, track);
+}
+
+void MainWindow::setChordVoiceTolerance() {
+    bool accepted = false;
+    const int current = _settings->value("ffxiv/chord_voice_tolerance_ticks", 0).toInt();
+    const int ticks = QInputDialog::getInt(
+        this, tr("Chord Voice Timing Tolerance"),
+        tr("Maximum onset difference in MIDI ticks (0 = exact same tick):"),
+        current, 0, 960, 1, &accepted);
+    if (accepted) {
+        _settings->setValue("ffxiv/chord_voice_tolerance_ticks", ticks);
+    }
+}
+
+void MainWindow::filterChordVoices(int mode, MidiTrack *track) {
+    if (!file || mode < 0 || mode > 2) return;
+
+    // A Tools-menu operation affects only selected notes. A track-menu operation
+    // affects the entire chosen track, regardless of any selection elsewhere.
+    QList<NoteOnEvent *> notes;
+    if (track) {
+        for (int ch = 0; ch < 16; ++ch) {
+            const QList<MidiEvent *> events = file->channel(ch)->eventMap()->values();
+            for (MidiEvent *ev : events) {
+                NoteOnEvent *note = dynamic_cast<NoteOnEvent *>(ev);
+                if (note && note->track() == track && note->offEvent())
+                    notes.append(note);
+            }
+        }
+    } else {
+        for (MidiEvent *ev : Selection::instance()->selectedEvents()) {
+            NoteOnEvent *note = dynamic_cast<NoteOnEvent *>(ev);
+            if (note && note->offEvent() && note->channel() >= 0 && note->channel() < 16)
+                notes.append(note);
+        }
+    }
+    if (notes.isEmpty()) {
+        statusBar()->showMessage(
+            track ? tr("This track contains no notes.") : tr("Select some notes first, or right-click a track to filter the entire track."),
+            6000);
+        return;
+    }
+
+    std::vector<FfxivVoice::Note> input;
+    input.reserve(static_cast<std::size_t>(notes.size()));
+    for (NoteOnEvent *note : notes) {
+        const auto id = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(note));
+        MidiTrack *noteTrack = note->track();
+        input.push_back({id, noteTrack ? noteTrack->number() : -1,
+                         note->channel(), note->note(), note->midiTime(),
+                         noteTrack ? noteTrack->name().toStdString() : std::string()});
+    }
+
+    const FfxivVoice::Mode filterMode = static_cast<FfxivVoice::Mode>(mode);
+    const int tolerance = qMax(0, _settings->value("ffxiv/chord_voice_tolerance_ticks", 0).toInt());
+    const std::set<std::uint64_t> toDelete = FfxivVoice::deletionIds(input, filterMode, tolerance);
+    if (toDelete.empty()) {
+        statusBar()->showMessage(tr("No notes matched this chord voice filter (drums are protected)."), 5000);
+        return;
+    }
+
+    // Select the exact notes to remove BEFORE making any changes. This avoids
+    // invalidating iterators into the editor's MIDI event maps during deletion.
+    QMap<int, QList<NoteOnEvent *>> deleteByChannel;
+    for (NoteOnEvent *note : notes) {
+        const auto id = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(note));
+        if (toDelete.count(id)) deleteByChannel[note->channel()].append(note);
+    }
+
+    const QStringList actionNames = {
+        tr("Keep Highest Chord Notes"),
+        tr("Keep Lowest Chord Notes"),
+        tr("Keep Inner Chord Notes")
+    };
+    file->protocol()->startNewAction(actionNames.at(mode));
+
+    // Same channel-snapshot protocol used by MidiEditor's Delete Overlaps tool:
+    // one snapshot per channel, one overall Undo step for the whole operation.
+    for (auto it = deleteByChannel.cbegin(); it != deleteByChannel.cend(); ++it) {
+        MidiChannel *channel = file->channel(it.key());
+        ProtocolEntry *before = channel->copy();
+        for (NoteOnEvent *note : it.value()) {
+            channel->removeEvent(note, false); // also removes its paired Note Off
+        }
+        channel->protocol(before, channel);
+    }
+    // Clear selection once (with protocol) so the event pane contains no removed notes.
+    Selection::instance()->clearSelection();
+    file->protocol()->endAction();
+    eventWidget()->reportSelectionChangedByTool();
+    updateAll();
+    statusBar()->showMessage(tr("Chord voice filter removed %1 notes. Undo: Ctrl+Z.").arg(static_cast<qulonglong>(toDelete.size())), 6000);
 }
 
 void MainWindow::strumNotes() {
@@ -4586,6 +4689,33 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     connect(explodeChordsAction, SIGNAL(triggered()), this, SLOT(explodeChordsToTracks()));
     toolsMB->addAction(explodeChordsAction);
     _actionMap["explode_chords_to_tracks"] = explodeChordsAction;
+
+    // FFXIV arranging: these commands permanently remove unwanted chord voices.
+    // Tools menu filters the selection; track context menu filters the whole track.
+    QMenu *chordVoiceMenu = toolsMB->addMenu(tr("Chord Voice Filter (FFXIV)"));
+    const QStringList chordVoiceLabels = {
+        tr("Keep Highest Note per Chord"),
+        tr("Keep Lowest Note per Chord"),
+        tr("Keep Inner Notes (Remove Outer Voices)")
+    };
+    const QStringList chordVoiceIds = {
+        QStringLiteral("ffxiv_keep_highest"),
+        QStringLiteral("ffxiv_keep_lowest"),
+        QStringLiteral("ffxiv_keep_inner")
+    };
+    for (int mode = 0; mode < 3; ++mode) {
+        QAction *action = chordVoiceMenu->addAction(chordVoiceLabels.at(mode));
+        action->setToolTip(tr("Permanently delete unwanted notes from selected chords. Drum notes are protected."));
+        connect(action, &QAction::triggered, this, [this, mode]() { filterChordVoices(mode); });
+        _activateWithSelections.append(action);
+        _actionMap[chordVoiceIds.at(mode)] = action;
+        _defaultShortcuts[chordVoiceIds.at(mode)] = QList<QKeySequence>();
+    }
+    chordVoiceMenu->addSeparator();
+    QAction *toleranceAction = chordVoiceMenu->addAction(tr("Set Onset Tolerance (Ticks)..."));
+    connect(toleranceAction, &QAction::triggered, this, &MainWindow::setChordVoiceTolerance);
+    _actionMap["ffxiv_chord_tolerance"] = toleranceAction;
+    _defaultShortcuts["ffxiv_chord_tolerance"] = QList<QKeySequence>();
 
     QAction *splitChannelsAction = new QAction(tr("Split Channels to Tracks"), this);
     splitChannelsAction->setShortcut(QKeySequence(QKeyCombination(Qt::CTRL | Qt::ALT, Qt::Key_E)));

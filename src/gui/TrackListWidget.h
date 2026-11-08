@@ -150,6 +150,8 @@ signals:
     void transposeTrackOctaveUpRequested(MidiTrack *track);
     void transposeTrackOctaveDownRequested(MidiTrack *track);
     void explodeTrackChordsRequested(MidiTrack *track);
+    /** Mode: 0 = highest, 1 = lowest, 2 = inner voices. */
+    void filterTrackChordVoicesRequested(MidiTrack *track, int mode);
     void splitTrackChannelsRequested(MidiTrack *track);
     void selectTrackEventsRequested(MidiTrack *track);
     void clearTrackEventsRequested(MidiTrack *track);
