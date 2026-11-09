@@ -27,7 +27,8 @@ SoundFontPresetPicker::SoundFontPresetPicker(
     auto *layout = new QVBoxLayout(this);
     auto *help = new QLabel(tr(
         "Select any preset from an enabled, loaded SoundFont. "
-        "This changes the built-in FluidSynth sound for the track's MIDI channel."), this);
+        "This changes the built-in FluidSynth sound for the track's MIDI channel "
+        "and automatically renames the selected track to the preset name."), this);
     help->setWordWrap(true);
     layout->addWidget(help);
 
@@ -69,6 +70,8 @@ SoundFontPresetPicker::SoundFontPresetPicker(
     auto *notice = new QLabel(tr(
         "Preview sound selection lasts until you open another MIDI file or close MidiEditor. "
         "For persistent portable MIDI settings, enable the bank/program checkbox. "
+        "The selected track is renamed to the preset name even in preview-only mode; "
+        "save the MIDI file to keep the new name. "
         "Separate tracks on the same MIDI channel cannot have independent instrument sounds."), this);
     notice->setWordWrap(true);
     layout->addWidget(notice);

@@ -4073,29 +4073,45 @@ void MainWindow::chooseSoundFontForTrack(MidiTrack *track) {
         return;
     }
 
-    if (dialog.writeMidiAssignment()) {
-        // Stop playback before modifying MIDI events. These channel
-        // messages are portable; the exact SoundFont path is not.
-        if (MidiPlayer::isPlaying()) stop();
-        MidiChannel *midiChannel = file->channel(channel);
-        QList<MidiEvent *> superseded;
-        for (auto *ev : midiChannel->eventMap()->values()) {
-            if (ev->track() != track) continue;
-            if (dynamic_cast<ProgChangeEvent *>(ev)) {
-                superseded.append(ev);
-            } else if (auto *cc = dynamic_cast<ControlChangeEvent *>(ev)) {
-                if (cc->control() == 0 || cc->control() == 32) superseded.append(ev);
+    // The preset name becomes the actual MIDI track name (not merely the
+    // temporary label in the arrangement header). MidiTrack::setName writes
+    // the track-name meta event, so saving the .mid retains the new name.
+    // Only this chosen track is renamed, even if its channel is shared.
+    const QString presetName = selected.name.trimmed();
+    const bool renameTrackToPreset = !presetName.isEmpty() && track->name() != presetName;
+    const bool writeMidiAssignment = dialog.writeMidiAssignment();
+
+    if (renameTrackToPreset || writeMidiAssignment) {
+        // Changing MIDI events while playing is unsafe. A preview-only
+        // selection still renames the track, but never rewrites bank/program.
+        if (writeMidiAssignment && MidiPlayer::isPlaying()) stop();
+
+        // Group the rename and optional MIDI instrument assignment into one
+        // reversible Undo/Redo operation.
+        file->protocol()->startNewAction(tr("Assign SoundFont Preset: %1").arg(selected.name));
+        if (writeMidiAssignment) {
+            // MIDI bank and program changes are portable; the SoundFont path
+            // itself cannot be embedded in a Standard MIDI File.
+            MidiChannel *midiChannel = file->channel(channel);
+            QList<MidiEvent *> superseded;
+            for (auto *ev : midiChannel->eventMap()->values()) {
+                if (ev->track() != track) continue;
+                if (dynamic_cast<ProgChangeEvent *>(ev)) {
+                    superseded.append(ev);
+                } else if (auto *cc = dynamic_cast<ControlChangeEvent *>(ev)) {
+                    if (cc->control() == 0 || cc->control() == 32) superseded.append(ev);
+                }
             }
+            for (auto *ev : superseded) midiChannel->removeEvent(ev);
+            // Bank Select MSB, Bank Select LSB, Program Change at tick zero.
+            const int bank = std::clamp(selected.bank, 0, 16383);
+            midiChannel->insertEvent(new ControlChangeEvent(channel, 0, (bank >> 7) & 0x7F, track), 0);
+            midiChannel->insertEvent(new ControlChangeEvent(channel, 32, bank & 0x7F, track), 0);
+            midiChannel->insertEvent(new ProgChangeEvent(channel, selected.program, track), 0);
         }
-        file->protocol()->startNewAction(tr("Set SoundFont Bank and Program"));
-        for (auto *ev : superseded) midiChannel->removeEvent(ev);
-        // Bank Select MSB, Bank Select LSB, then Program Change at tick zero.
-        // Bank > 127 is represented as the standard 14-bit MIDI bank value.
-        const int bank = std::clamp(selected.bank, 0, 16383);
-        midiChannel->insertEvent(new ControlChangeEvent(channel, 0, (bank >> 7) & 0x7F, track), 0);
-        midiChannel->insertEvent(new ControlChangeEvent(channel, 32, bank & 0x7F, track), 0);
-        midiChannel->insertEvent(new ProgChangeEvent(channel, selected.program, track), 0);
+        if (renameTrackToPreset) track->setName(presetName);
         file->protocol()->endAction();
+        if (renameTrackToPreset) updateTrackMenu();
     }
     if (_arrangementWidget)
         _arrangementWidget->setTrackPresetLabel(track, selected.name);
