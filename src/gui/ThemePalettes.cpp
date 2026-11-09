@@ -90,6 +90,10 @@ QString getMaterialDarkStyleSheet() {
         QMenu::item:disabled:selected { color:#8995A7; background:#2D3745; }
         QMenu::separator { height:1px; background:#475568; margin:5px 9px; }
         QMenu::icon { padding-left:5px; }
+        /* Match the message-box background and text contrast. */
+        QMessageBox { background-color:#232B36; color:#EDF2FA; }
+        QMessageBox QLabel { color:#EDF2FA; background-color:transparent; }
+        QMessageBox QPushButton { color:#FFFFFF; }
         QToolBar { background-color:#242B35; color:#E8EEF8;
                    border:0; spacing:4px; }
         QToolBar::separator { background-color:#475567; width:1px;

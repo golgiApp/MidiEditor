@@ -1,6 +1,7 @@
 #include "Appearance.h"
 #include <QStyleFactory>
 #include <QStyleHints>
+#include <QMessageBox>
 #include <QTimer>
 #include <QDateTime>
 #include <QFile>
@@ -19,6 +20,51 @@
 #ifdef Q_OS_WIN
 #include <dwmapi.h>
 
+// Windows may render a native-looking *light* QMessageBox content area even
+// while the application's palette specifies light-on-dark text.  Style the
+// message-box container and its labels together so confirmations and download
+// notifications remain readable.  This is scoped to message boxes only; it
+// does not disturb the rest of the application's widget styling.
+static void applyDarkMessageBoxStyle(QMessageBox *box) {
+    if (!box || !Appearance::shouldUseDarkMode() ||
+        box->property("ffxivDarkMessageBoxStyled").toBool()) {
+        return;
+    }
+
+    // Mark first: setting a stylesheet can send additional polish/show events.
+    box->setProperty("ffxivDarkMessageBoxStyled", true);
+    box->setAttribute(Qt::WA_StyledBackground, true);
+
+    QPalette p = box->palette();
+    const QColor bg(35, 43, 54);
+    const QColor fg(237, 242, 250);
+    p.setColor(QPalette::Active, QPalette::Window, bg);
+    p.setColor(QPalette::Active, QPalette::WindowText, fg);
+    p.setColor(QPalette::Active, QPalette::Text, fg);
+    p.setColor(QPalette::Active, QPalette::ButtonText, fg);
+    p.setColor(QPalette::Inactive, QPalette::Window, bg);
+    p.setColor(QPalette::Inactive, QPalette::WindowText, fg);
+    p.setColor(QPalette::Inactive, QPalette::Text, fg);
+    p.setColor(QPalette::Inactive, QPalette::ButtonText, fg);
+    box->setPalette(p);
+
+    box->setStyleSheet(QStringLiteral(R"QSS(
+        QMessageBox { background-color: #232B36; color: #EDF2FA; }
+        QMessageBox QLabel { color: #EDF2FA; background-color: transparent; }
+        QMessageBox QPushButton {
+            color: #FFFFFF; background-color: #354B64;
+            border: 1px solid #71849B; border-radius: 5px;
+            padding: 5px 14px; min-width: 52px; min-height: 22px;
+        }
+        QMessageBox QPushButton:hover { background-color: #426B96; }
+        QMessageBox QPushButton:pressed { background-color: #245B93; }
+        QMessageBox QPushButton:disabled {
+            color: #8D9AAB; background-color: #2B3541; border-color: #465465;
+        }
+        QMessageBox QTextEdit { background-color: #1C2530; color: #EDF2FA; }
+    )QSS"));
+}
+
 class AppearanceEventFilter : public QObject {
 public:
     AppearanceEventFilter(QObject *parent = nullptr) : QObject(parent) {}
@@ -26,6 +72,9 @@ public:
         if (event->type() == QEvent::Show) {
             QWidget *widget = qobject_cast<QWidget *>(watched);
             if (widget && widget->isWindow()) {
+                if (QMessageBox *box = qobject_cast<QMessageBox *>(widget)) {
+                    applyDarkMessageBoxStyle(box);
+                }
                 Appearance::applyTitleBarColor(widget);
             }
         }
@@ -138,11 +187,8 @@ void Appearance::init(QSettings *settings) {
 
     QList<QVariant> customTracks = settings->value("custom_track_colors", QList<QVariant>()).toList();
     foreach(const QVariant& var, customTracks) {
-        bool valid = false;
-        const int track = var.toInt(&valid);
-        if (valid && track >= 0 && track < 17) {
-            customTrackColors.insert(track);
-        }
+        int track = var.toInt();
+        customTrackColors.insert(track);
     }
 
     // Load colors: Custom colors from settings, default colors for current theme
@@ -163,11 +209,11 @@ void Appearance::init(QSettings *settings) {
         if (customTrackColors.contains(track)) {
             // User has customized this track - load their custom color from settings
             QColor *customColor = decode("track_color_" + QString::number(track),
-                                         settings, defaultTrackColor(track));
+                                         settings, defaultColor(track));
             trackColors.insert(track, customColor);
         } else {
             // User has NOT customized this track - use current theme's default
-            QColor *themeDefaultColor = defaultTrackColor(track);
+            QColor *themeDefaultColor = defaultColor(track);
             trackColors.insert(track, themeDefaultColor);
         }
     }
@@ -191,7 +237,7 @@ void Appearance::init(QSettings *settings) {
     QSet<int> invalidCustomTracks;
     foreach(int track, customTrackColors) {
         QColor *currentColor = trackColors.value(track, nullptr);
-        QColor *defaultColor = Appearance::defaultTrackColor(track);
+        QColor *defaultColor = Appearance::defaultColor(track);
         if (currentColor && defaultColor) {
             bool actuallyCustom = (currentColor->red() != defaultColor->red() ||
                                    currentColor->green() != defaultColor->green() ||
@@ -247,7 +293,7 @@ QColor *Appearance::trackColor(int track) {
     // Get existing color or create default for current theme
     QColor *color = trackColors.value(index, nullptr);
     if (!color) {
-        color = defaultTrackColor(index);
+        color = defaultColor(index);
         trackColors[index] = color;
     }
 
@@ -309,20 +355,6 @@ void Appearance::writeSettings(QSettings *settings) {
         customTracks.append(track);
     }
     settings->setValue("custom_track_colors", customTracks);
-}
-
-QColor *Appearance::defaultTrackColor(int index) {
-    if (_colorPreset != PresetDefault) {
-        return defaultColor(index);
-    }
-
-    static const QRgb palette[] = {
-        0xFF6195CF, 0xFF5AAEAA, 0xFF9B84D1, 0xFFD2A35D, 0xFF78AA72,
-        0xFFCC7D92, 0xFF6B9FC6, 0xFFB497C3, 0xFF73A996, 0xFFCA906F,
-        0xFF8999CB, 0xFFB2A96A, 0xFF68A7BA, 0xFFBD81A8, 0xFF8FAA79,
-        0xFFC79D83, 0xFF8496A9
-    };
-    return new QColor(QColor::fromRgb(palette[index]));
 }
 
 QColor *Appearance::defaultColor(int n) {
@@ -637,7 +669,7 @@ void Appearance::setTrackColor(int track, QColor color) {
     trackColors[index] = new QColor(color);
 
     // Only mark as custom if the color is different from current theme default
-    QColor *currentDefault = defaultTrackColor(index);
+    QColor *currentDefault = defaultColor(index);
     bool isCustomColor = (currentDefault->red() != color.red() ||
                           currentDefault->green() != color.green() ||
                           currentDefault->blue() != color.blue());
@@ -735,7 +767,7 @@ void Appearance::autoResetDefaultColors() {
             QColor *existingColor = trackColors.value(track, nullptr);
             if (existingColor) {
                 QColor oldColor = *existingColor; // Save for logging
-                QColor *newThemeDefault = defaultTrackColor(track);
+                QColor *newThemeDefault = defaultColor(track);
 
                 // Copy the new theme default values to existing color object
                 existingColor->setRgb(newThemeDefault->red(),
@@ -777,7 +809,7 @@ void Appearance::forceResetAllColors() {
     for (int track = 0; track < 17; track++) {
         QColor *existingColor = trackColors.value(track, nullptr);
         if (existingColor) {
-            QColor *newDefaultColor = defaultTrackColor(track);
+            QColor *newDefaultColor = defaultColor(track);
             if (newDefaultColor) {
                 // Copy the color values safely
                 int r = newDefaultColor->red();
@@ -1328,10 +1360,6 @@ QColor Appearance::grayColor() {
 }
 
 QColor Appearance::pianoWhiteKeyColor() {
-    return Qt::white;
-}
-
-QColor Appearance::pianoRulerColor() {
     if (_applicationTheme == ThemeMaterialDark) {
         return QColor(55, 55, 58);
     }
@@ -1348,23 +1376,83 @@ QColor Appearance::pianoRulerColor() {
 }
 
 QColor Appearance::pianoBlackKeyColor() {
+    if (_applicationTheme == ThemeMaterialDark) {
+        return QColor(22, 22, 25);
+    }
+    if (_applicationTheme == ThemeAMOLED) {
+        return QColor(0, 0, 0);
+    }
+    if (_applicationTheme == ThemeNord) {
+        return QColor(46, 52, 64); // nord0
+    }
+    if (shouldUseDarkMode()) {
+        return Qt::black; // Keep black keys black in dark mode
+    }
     return Qt::black;
 }
 
 QColor Appearance::pianoWhiteKeyHoverColor() {
-    return QColor(217, 230, 244);
+    if (_applicationTheme == ThemeMaterialDark) {
+        return QColor(70, 70, 75);
+    }
+    if (_applicationTheme == ThemeAMOLED) {
+        return QColor(50, 50, 50);
+    }
+    if (_applicationTheme == ThemeNord) {
+        return QColor(94, 105, 122);
+    }
+    if (shouldUseDarkMode()) {
+        return QColor(100, 100, 100); // Dark gray for hover in dark mode
+    }
+    return Qt::darkGray; // Original Qt color for light mode
 }
 
 QColor Appearance::pianoBlackKeyHoverColor() {
-    return QColor(48, 63, 79);
+    if (_applicationTheme == ThemeMaterialDark) {
+        return QColor(45, 45, 48);
+    }
+    if (_applicationTheme == ThemeAMOLED) {
+        return QColor(30, 30, 30);
+    }
+    if (_applicationTheme == ThemeNord) {
+        return QColor(67, 76, 94); // nord2
+    }
+    if (shouldUseDarkMode()) {
+        return QColor(150, 150, 150); // Light gray for hover in dark mode
+    }
+    return Qt::lightGray; // Original Qt color for light mode
 }
 
 QColor Appearance::pianoWhiteKeySelectedColor() {
-    return QColor(232, 238, 245);
+    if (_applicationTheme == ThemeMaterialDark) {
+        return QColor(80, 85, 90);
+    }
+    if (_applicationTheme == ThemeAMOLED) {
+        return QColor(60, 60, 60);
+    }
+    if (_applicationTheme == ThemeNord) {
+        return QColor(110, 125, 145);
+    }
+    if (shouldUseDarkMode()) {
+        return QColor(150, 150, 150); // Light gray for selected in dark mode
+    }
+    return Qt::lightGray; // Original Qt color for light mode
 }
 
 QColor Appearance::pianoBlackKeySelectedColor() {
-    return QColor(31, 39, 48);
+    if (_applicationTheme == ThemeMaterialDark) {
+        return QColor(50, 50, 55);
+    }
+    if (_applicationTheme == ThemeAMOLED) {
+        return QColor(35, 35, 35);
+    }
+    if (_applicationTheme == ThemeNord) {
+        return QColor(76, 86, 106); // nord3
+    }
+    if (shouldUseDarkMode()) {
+        return QColor(100, 100, 100); // Dark gray for selected in dark mode
+    }
+    return Qt::darkGray; // Original Qt color for light mode
 }
 
 QColor Appearance::pianoWhiteKeyActiveColor() {
