@@ -502,6 +502,7 @@ public:
      * \return QColor for piano white keys
      */
     static QColor pianoWhiteKeyColor();
+    static QColor pianoRulerColor();
 
     /**
      * \brief Gets the piano black key color for the current theme.
@@ -780,6 +781,7 @@ private:
      * \return Pointer to the default QColor
      */
     static QColor *defaultColor(int n);
+    static QColor *defaultTrackColor(int index);
 
     // === Settings I/O ===
 

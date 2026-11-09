@@ -663,6 +663,7 @@ private:
 
     // Additional theme colors
     QColor _cachedPianoWhiteKeyColor;
+    QColor _cachedPianoRulerColor;
     QColor _cachedPianoWhiteKeyHoverColor;
     QColor _cachedPianoWhiteKeySelectedColor;
     QColor _cachedPianoWhiteKeyActiveColor;

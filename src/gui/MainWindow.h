@@ -536,6 +536,7 @@ public slots:
     void removeTrack(int tracknumber);
 
     void setInstrumentForChannel(int i);
+    void chooseSoundFontForTrack(MidiTrack *track);
 
     void spreadSelection();
 

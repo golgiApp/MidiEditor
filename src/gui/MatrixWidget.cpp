@@ -467,7 +467,6 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                                 height());
 
         pixpainter->setPen(_cachedDarkGrayColor);
-        pixpainter->setBrush(_cachedPianoWhiteKeyColor);
         
         // Box for measures/time text: Top, Left, and Right lines only (no bottom border for a cleaner look)
         pixpainter->drawLine(lineNameWidth, 2, width() - 1, 2);
@@ -475,13 +474,13 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         pixpainter->drawLine(width() - 1, 2, width() - 1, rulerHeight);
         
         // Background for the ruler
-        pixpainter->fillRect(lineNameWidth + 1, 3, width() - lineNameWidth - 2, rulerHeight - 4, _cachedPianoWhiteKeyColor);
+        pixpainter->fillRect(lineNameWidth + 1, 3, width() - lineNameWidth - 2, rulerHeight - 4, _cachedPianoRulerColor);
         
         pixpainter->setPen(_cachedForegroundColor);
 
         if (_markerRowHeight > 0) {
             // Background for markers - match the ruler background
-            pixpainter->fillRect(lineNameWidth, rulerHeight, width() - lineNameWidth, _markerRowHeight, _cachedPianoWhiteKeyColor);
+            pixpainter->fillRect(lineNameWidth, rulerHeight, width() - lineNameWidth, _markerRowHeight, _cachedPianoRulerColor);
             
             // Minimal top separator from ruler
             pixpainter->setPen(_cachedBorderColor);
@@ -1214,7 +1213,7 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
         painter->drawPolygon(keyPolygon, Qt::OddEvenFill);
 
         if (name != "") {
-            painter->setPen(Qt::gray); // Original color for both modes
+            painter->setPen(QColor(65, 65, 65));
             QFontMetrics fm(painter->font());
             int textlength = fm.horizontalAdvance(name);
 
@@ -1905,6 +1904,7 @@ void MatrixWidget::updateCachedAppearanceColors() {
     _cachedPianoBlackKeySelectedColor = Appearance::pianoBlackKeySelectedColor();
     _cachedPianoBlackKeyActiveColor = Appearance::pianoBlackKeyActiveColor();
     _cachedPianoWhiteKeyColor = Appearance::pianoWhiteKeyColor();
+    _cachedPianoRulerColor = Appearance::pianoRulerColor();
     _cachedPianoWhiteKeyHoverColor = Appearance::pianoWhiteKeyHoverColor();
     _cachedPianoWhiteKeySelectedColor = Appearance::pianoWhiteKeySelectedColor();
     _cachedPianoWhiteKeyActiveColor = Appearance::pianoWhiteKeyActiveColor();

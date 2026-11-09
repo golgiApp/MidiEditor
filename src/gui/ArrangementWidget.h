@@ -45,6 +45,7 @@ public:
     std::function<void(MidiTrack *)> selectTrackRequested;
     std::function<void(MidiTrack *, const QPoint &)> trackMenuRequested;
     std::function<void(MidiTrack *)> renameTrackRequested;
+    std::function<void(MidiTrack *)> soundFontPresetRequested;
     std::function<void(MidiTrack *)> cloneTrackRequested;
     std::function<void(MidiTrack *)> removeTrackRequested;
     std::function<void(int)> scrollTimeRequested;
@@ -199,7 +200,8 @@ protected:
             const int y = rulerHeight + i * laneHeight;
             if (y > height()) break;
             const bool chosen = t == _selected;
-            const QColor c = t->color() ? *t->color() : QColor("#7EA4D4");
+            QColor c = *t->color();
+            c.setAlpha(255);
             p.fillRect(0, y, width(), laneHeight, chosen ? QColor("#363D48") :
                        (i % 2 ? QColor("#252930") : QColor("#292D34")));
             p.setPen(QColor("#414753"));
@@ -223,6 +225,7 @@ protected:
             drawButton(p, visibilityRect(y), QStringLiteral("Show"), !t->hidden(), QColor("#1767A4"));
             drawButton(p, muteRect(y), QStringLiteral("Mute"), t->muted(), QColor("#A83C4B"));
             drawButton(p, soloRect(y), QStringLiteral("Solo"), t == _solo, QColor("#9B761D"));
+            drawButton(p, soundFontRect(y), tr("SoundFont"), false, QColor("#55748E"));
             drawButton(p, renameRect(y), QStringLiteral("Rename"), false, QColor("#55748E"));
             drawButton(p, cloneRect(y), QStringLiteral("Clone"), false, QColor("#55748E"));
             drawButton(p, removeRect(y), QStringLiteral("Delete"), false, QColor("#A83C4B"));
@@ -243,9 +246,12 @@ protected:
             const int x1 = std::min(width() - 2, xForMs(end));
             if (x1 <= x0) continue;
             QColor region = c;
-            region.setAlpha(56);
+            region.setAlpha(chosen ? 52 : 32);
             p.fillRect(QRect(x0, y + 6, x1 - x0, laneHeight - 12), region);
-            p.setPen(c);
+            QColor border = c;
+            border.setAlpha(chosen ? 210 : 115);
+            p.setPen(border);
+            p.setBrush(Qt::NoBrush);
             p.drawRect(QRect(x0, y + 6, x1 - x0, laneHeight - 12));
             p.setPen(Qt::NoPen);
             p.setBrush(c);
@@ -343,6 +349,10 @@ protected:
                     setSelectedTrack(track);
                     if (selectTrackRequested) selectTrackRequested(track);
                     if (trackMenuRequested) trackMenuRequested(track, mapToGlobal(pos));
+                } else if (soundFontRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    setSelectedTrack(track);
+                    if (selectTrackRequested) selectTrackRequested(track);
+                    if (soundFontPresetRequested) soundFontPresetRequested(track);
                 } else if (renameRect(rulerHeight + row * laneHeight).contains(pos)) {
                     setSelectedTrack(track);
                     if (selectTrackRequested) selectTrackRequested(track);
@@ -411,6 +421,7 @@ protected:
                 if (visibilityRect(top).contains(pos)) tooltip = tr("Show / hide track notes in Piano Roll");
                 else if (muteRect(top).contains(pos)) tooltip = tr("Mute / unmute track during playback");
                 else if (soloRect(top).contains(pos)) tooltip = tr("Solo track during playback");
+                else if (soundFontRect(top).contains(pos)) tooltip = tr("Choose a preset from a loaded SoundFont");
                 else if (renameRect(top).contains(pos)) tooltip = tr("Rename track");
                 else if (cloneRect(top).contains(pos)) tooltip = tr("Clone track");
                 else if (removeRect(top).contains(pos)) tooltip = tr("Delete track");
@@ -499,6 +510,7 @@ private:
     QRect visibilityRect(int y) const { return QRect(13, y + 51, 67, 27); }
     QRect muteRect(int y) const { return QRect(87, y + 51, 66, 27); }
     QRect soloRect(int y) const { return QRect(160, y + 51, 67, 27); }
+    QRect soundFontRect(int y) const { return QRect(234, y + 51, 78, 27); }
     QRect renameRect(int y) const { return QRect(13, y + 84, 70, 27); }
     QRect cloneRect(int y) const { return QRect(90, y + 84, 66, 27); }
     QRect removeRect(int y) const { return QRect(163, y + 84, 66, 27); }

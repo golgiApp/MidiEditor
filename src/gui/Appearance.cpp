@@ -138,8 +138,11 @@ void Appearance::init(QSettings *settings) {
 
     QList<QVariant> customTracks = settings->value("custom_track_colors", QList<QVariant>()).toList();
     foreach(const QVariant& var, customTracks) {
-        int track = var.toInt();
-        customTrackColors.insert(track);
+        bool valid = false;
+        const int track = var.toInt(&valid);
+        if (valid && track >= 0 && track < 17) {
+            customTrackColors.insert(track);
+        }
     }
 
     // Load colors: Custom colors from settings, default colors for current theme
@@ -160,11 +163,11 @@ void Appearance::init(QSettings *settings) {
         if (customTrackColors.contains(track)) {
             // User has customized this track - load their custom color from settings
             QColor *customColor = decode("track_color_" + QString::number(track),
-                                         settings, defaultColor(track));
+                                         settings, defaultTrackColor(track));
             trackColors.insert(track, customColor);
         } else {
             // User has NOT customized this track - use current theme's default
-            QColor *themeDefaultColor = defaultColor(track);
+            QColor *themeDefaultColor = defaultTrackColor(track);
             trackColors.insert(track, themeDefaultColor);
         }
     }
@@ -188,7 +191,7 @@ void Appearance::init(QSettings *settings) {
     QSet<int> invalidCustomTracks;
     foreach(int track, customTrackColors) {
         QColor *currentColor = trackColors.value(track, nullptr);
-        QColor *defaultColor = Appearance::defaultColor(track);
+        QColor *defaultColor = Appearance::defaultTrackColor(track);
         if (currentColor && defaultColor) {
             bool actuallyCustom = (currentColor->red() != defaultColor->red() ||
                                    currentColor->green() != defaultColor->green() ||
@@ -244,7 +247,7 @@ QColor *Appearance::trackColor(int track) {
     // Get existing color or create default for current theme
     QColor *color = trackColors.value(index, nullptr);
     if (!color) {
-        color = defaultColor(index);
+        color = defaultTrackColor(index);
         trackColors[index] = color;
     }
 
@@ -306,6 +309,20 @@ void Appearance::writeSettings(QSettings *settings) {
         customTracks.append(track);
     }
     settings->setValue("custom_track_colors", customTracks);
+}
+
+QColor *Appearance::defaultTrackColor(int index) {
+    if (_colorPreset != PresetDefault) {
+        return defaultColor(index);
+    }
+
+    static const QRgb palette[] = {
+        0xFF6195CF, 0xFF5AAEAA, 0xFF9B84D1, 0xFFD2A35D, 0xFF78AA72,
+        0xFFCC7D92, 0xFF6B9FC6, 0xFFB497C3, 0xFF73A996, 0xFFCA906F,
+        0xFF8999CB, 0xFFB2A96A, 0xFF68A7BA, 0xFFBD81A8, 0xFF8FAA79,
+        0xFFC79D83, 0xFF8496A9
+    };
+    return new QColor(QColor::fromRgb(palette[index]));
 }
 
 QColor *Appearance::defaultColor(int n) {
@@ -620,7 +637,7 @@ void Appearance::setTrackColor(int track, QColor color) {
     trackColors[index] = new QColor(color);
 
     // Only mark as custom if the color is different from current theme default
-    QColor *currentDefault = defaultColor(index);
+    QColor *currentDefault = defaultTrackColor(index);
     bool isCustomColor = (currentDefault->red() != color.red() ||
                           currentDefault->green() != color.green() ||
                           currentDefault->blue() != color.blue());
@@ -718,7 +735,7 @@ void Appearance::autoResetDefaultColors() {
             QColor *existingColor = trackColors.value(track, nullptr);
             if (existingColor) {
                 QColor oldColor = *existingColor; // Save for logging
-                QColor *newThemeDefault = defaultColor(track);
+                QColor *newThemeDefault = defaultTrackColor(track);
 
                 // Copy the new theme default values to existing color object
                 existingColor->setRgb(newThemeDefault->red(),
@@ -760,7 +777,7 @@ void Appearance::forceResetAllColors() {
     for (int track = 0; track < 17; track++) {
         QColor *existingColor = trackColors.value(track, nullptr);
         if (existingColor) {
-            QColor *newDefaultColor = defaultColor(track);
+            QColor *newDefaultColor = defaultTrackColor(track);
             if (newDefaultColor) {
                 // Copy the color values safely
                 int r = newDefaultColor->red();
@@ -1311,6 +1328,10 @@ QColor Appearance::grayColor() {
 }
 
 QColor Appearance::pianoWhiteKeyColor() {
+    return Qt::white;
+}
+
+QColor Appearance::pianoRulerColor() {
     if (_applicationTheme == ThemeMaterialDark) {
         return QColor(55, 55, 58);
     }
@@ -1327,83 +1348,23 @@ QColor Appearance::pianoWhiteKeyColor() {
 }
 
 QColor Appearance::pianoBlackKeyColor() {
-    if (_applicationTheme == ThemeMaterialDark) {
-        return QColor(22, 22, 25);
-    }
-    if (_applicationTheme == ThemeAMOLED) {
-        return QColor(0, 0, 0);
-    }
-    if (_applicationTheme == ThemeNord) {
-        return QColor(46, 52, 64); // nord0
-    }
-    if (shouldUseDarkMode()) {
-        return Qt::black; // Keep black keys black in dark mode
-    }
     return Qt::black;
 }
 
 QColor Appearance::pianoWhiteKeyHoverColor() {
-    if (_applicationTheme == ThemeMaterialDark) {
-        return QColor(70, 70, 75);
-    }
-    if (_applicationTheme == ThemeAMOLED) {
-        return QColor(50, 50, 50);
-    }
-    if (_applicationTheme == ThemeNord) {
-        return QColor(94, 105, 122);
-    }
-    if (shouldUseDarkMode()) {
-        return QColor(100, 100, 100); // Dark gray for hover in dark mode
-    }
-    return Qt::darkGray; // Original Qt color for light mode
+    return QColor(217, 230, 244);
 }
 
 QColor Appearance::pianoBlackKeyHoverColor() {
-    if (_applicationTheme == ThemeMaterialDark) {
-        return QColor(45, 45, 48);
-    }
-    if (_applicationTheme == ThemeAMOLED) {
-        return QColor(30, 30, 30);
-    }
-    if (_applicationTheme == ThemeNord) {
-        return QColor(67, 76, 94); // nord2
-    }
-    if (shouldUseDarkMode()) {
-        return QColor(150, 150, 150); // Light gray for hover in dark mode
-    }
-    return Qt::lightGray; // Original Qt color for light mode
+    return QColor(48, 63, 79);
 }
 
 QColor Appearance::pianoWhiteKeySelectedColor() {
-    if (_applicationTheme == ThemeMaterialDark) {
-        return QColor(80, 85, 90);
-    }
-    if (_applicationTheme == ThemeAMOLED) {
-        return QColor(60, 60, 60);
-    }
-    if (_applicationTheme == ThemeNord) {
-        return QColor(110, 125, 145);
-    }
-    if (shouldUseDarkMode()) {
-        return QColor(150, 150, 150); // Light gray for selected in dark mode
-    }
-    return Qt::lightGray; // Original Qt color for light mode
+    return QColor(232, 238, 245);
 }
 
 QColor Appearance::pianoBlackKeySelectedColor() {
-    if (_applicationTheme == ThemeMaterialDark) {
-        return QColor(50, 50, 55);
-    }
-    if (_applicationTheme == ThemeAMOLED) {
-        return QColor(35, 35, 35);
-    }
-    if (_applicationTheme == ThemeNord) {
-        return QColor(76, 86, 106); // nord3
-    }
-    if (shouldUseDarkMode()) {
-        return QColor(100, 100, 100); // Dark gray for selected in dark mode
-    }
-    return Qt::darkGray; // Original Qt color for light mode
+    return QColor(31, 39, 48);
 }
 
 QColor Appearance::pianoWhiteKeyActiveColor() {
