@@ -14,6 +14,8 @@
 #include <QContextMenuEvent>
 #include <QPoint>
 #include <QWheelEvent>
+#include <QResizeEvent>
+#include <cmath>
 #include <QHash>
 #include <QVector>
 #include <QScrollArea>
@@ -32,9 +34,11 @@
 #include <QMenu>
 #include <QDebug>
 #include "../region/MidiRegionModel.h"
+#include "../region/RegionSplitPrecision.h"
 #include <cstdlib>
 #include <functional>
 #include <algorithm>
+#include <limits>
 
 #include "../midi/MidiFile.h"
 #include "../midi/MidiTrack.h"
@@ -58,14 +62,32 @@ public:
     std::function<void(MidiTrack *)> cloneTrackRequested;
     std::function<void(MidiTrack *)> removeTrackRequested;
     std::function<void(int)> scrollTimeRequested;
+    // Range and page step (in milliseconds) for the arrangement-only scrollbar.
+    std::function<void(int, int)> scrollRangeChanged;
     // Commit a clicked time to the actual MIDI transport cursor, not just
     // the arrangement drawing. The owner handles playback/pause state.
     std::function<void(int)> seekTimeRequested;
 
-    // View origin is shared with the Piano Roll's horizontal scrollbar.
+    // Arrangement and Piano Roll use independent horizontal scroll positions.
     void setOriginMs(int ms) {
-        ms = std::max(0, ms);
+        ms = std::clamp(ms, 0, maxOriginMs());
         if (ms != _originMs) { _originMs = ms; update(); }
+    }
+    int maxOriginMs() const {
+        if (!_file) return 0;
+        const int visibleMs = visibleTimeMs();
+        // Include an extra second of visual room after the last MIDI event.
+        const auto songEnd = static_cast<long long>(_file->maxTime()) + 1000;
+        return static_cast<int>(std::clamp(songEnd - visibleMs,
+                     0LL, static_cast<long long>(std::numeric_limits<int>::max())));
+    }
+    void refreshHorizontalRange() {
+        const int maxMs = maxOriginMs();
+        if (_originMs > maxMs) {
+            _originMs = maxMs;
+            if (scrollTimeRequested) scrollTimeRequested(_originMs);
+        }
+        if (scrollRangeChanged) scrollRangeChanged(maxMs, visibleTimeMs());
     }
     static constexpr int headerWidth = 326;
     static constexpr int rulerHeight = 34;
@@ -82,6 +104,9 @@ public:
         _selectedRegionId = 0;
         _solo = nullptr;
         _originMs = 0;
+        if (scrollTimeRequested) scrollTimeRequested(0);
+        _hoverTick = -1;
+        _hoverRow = -1;
         _dragging = false;
         _timelinePressed = false;
         _playheadMs = file ? file->msOfTick(file->cursorTick()) : -1;
@@ -93,6 +118,7 @@ public:
                     [this]() { rebuildPreview(); });
         }
         rebuildPreview();
+        refreshHorizontalRange();
     }
 
     void setSelectedTrack(MidiTrack *track) {
@@ -114,9 +140,10 @@ public:
             if (x < headerWidth || x > width() - rightMargin) {
                 const int origin = std::max(0, _playheadMs -
                     int(timelineWidth * 0.20 / _scale));
-                if (origin != _originMs) {
-                    _originMs = origin;
-                    if (scrollTimeRequested) scrollTimeRequested(origin);
+                const int scrollOrigin = std::min(origin, maxOriginMs());
+                if (scrollOrigin != _originMs) {
+                    _originMs = scrollOrigin;
+                    if (scrollTimeRequested) scrollTimeRequested(scrollOrigin);
                 }
             }
         }
@@ -166,13 +193,14 @@ public:
                 MidiTrack *track = _file->tracks()->at(i);
                 const auto &notes = _preview[track];
                 if (notes.isEmpty()) continue;
-                int firstTick = notes.first().beginTick;
                 int lastTick = notes.first().endTick;
                 for (const auto &note : notes) {
-                    firstTick = std::min(firstTick, note.beginTick);
                     lastTick = std::max(lastTick, note.endTick);
                 }
-                _regions.addInitial(i, std::max(0, firstTick), std::max(firstTick + 1, lastTick));
+                // Start at the beginning of the arrangement, not the first
+                // audible note. Otherwise a click in a track's initial silence
+                // cannot split the region at the requested time.
+                _regions.addInitial(i, 0, std::max(1, lastTick));
             }
             _regionTrackCount = count;
             if (!_regionsReady) loadRegionLayout();
@@ -180,6 +208,7 @@ public:
         }
         setMinimumHeight(std::max(130, rulerHeight + count * laneHeight));
         updateGeometry();
+        refreshHorizontalRange();
         update();
     }
 
@@ -213,6 +242,11 @@ public:
     }
 
 protected:
+    void resizeEvent(QResizeEvent *event) override {
+        QWidget::resizeEvent(event);
+        refreshHorizontalRange();
+    }
+
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, false);
@@ -356,6 +390,19 @@ protected:
             }
         }
 
+        // An accurate hover guide previews the exact split tick represented
+        // by the cursor; this is not a snap-to-grid marker.
+        if (_hoverTick >= 0 && _hoverRow >= 0 && _hoverRow < tracks.size()) {
+            const int guideX = xForMs(_file->msOfTick(_hoverTick));
+            const int guideY = rulerHeight + _hoverRow * laneHeight;
+            if (guideX >= headerWidth && guideX < width()) {
+                p.save();
+                p.setPen(QPen(QColor("#FFCB75"), 1, Qt::DashLine));
+                p.drawLine(guideX, guideY, guideX, guideY + laneHeight - 2);
+                p.restore();
+            }
+        }
+
         // Draw the header boundary first, then put the bright playback line on
         // top of every lane's regions/notes (including at time zero).
         p.setPen(QColor("#515966"));
@@ -404,14 +451,28 @@ protected:
                 setSelectedTrack(track);
                 if (selectTrackRequested) selectTrackRequested(track);
                 QMenu menu(this);
-                QAction *splitHere = menu.addAction(tr("Split Region Here"));
+                // Exact-click splitting is pixel-accurate at the current zoom
+                // rather than silently jumping to a nearby note/measure.
+                QAction *splitHere = menu.addAction(tr("Split Here (Exact Click)"));
                 splitHere->setEnabled(tick > region->startTick && tick < region->endTick());
+                const int tpq = std::max(1, _file->ticksPerQuarter());
+                const int sixteenth = xiv::snapToQuarterSubdivision(tick, tpq, 4);
+                const int quarter = xiv::snapToQuarterSubdivision(tick, tpq, 1);
+                QAction *split16th = menu.addAction(tr("Split at Nearest 1/16 Note"));
+                split16th->setEnabled(sixteenth > region->startTick &&
+                                       sixteenth < region->endTick());
+                QAction *splitBeat = menu.addAction(tr("Split at Nearest Beat"));
+                splitBeat->setEnabled(quarter > region->startTick &&
+                                      quarter < region->endTick());
+                menu.addSeparator();
                 const int cursorTick = _file->cursorTick();
                 QAction *splitAtCursor = menu.addAction(tr("Split Region at Playhead"));
                 splitAtCursor->setEnabled(cursorTick > region->startTick &&
                                           cursorTick < region->endTick());
                 QAction *chosen = menu.exec(e->globalPos());
                 if (chosen == splitHere) splitRegion(id, tick);
+                else if (chosen == split16th) splitRegion(id, sixteenth);
+                else if (chosen == splitBeat) splitRegion(id, quarter);
                 else if (chosen == splitAtCursor) splitRegion(id, cursorTick);
                 update();
                 e->accept();
@@ -531,6 +592,17 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
+        int hoverTick = -1, hoverRow = -1;
+        if (_file && pos.x() >= headerWidth && pos.y() >= rulerHeight) {
+            const int row = (pos.y() - rulerHeight) / laneHeight;
+            const int tick = timelineTickAt(pos.x());
+            if (_regions.at(row, tick)) { hoverTick = tick; hoverRow = row; }
+        }
+        if (_hoverTick != hoverTick || _hoverRow != hoverRow) {
+            _hoverTick = hoverTick;
+            _hoverRow = hoverRow;
+            update();
+        }
         if (_timelinePressed) {
             const int dx = pos.x() - _dragX;
             if (!_dragging && std::abs(dx) >= QApplication::startDragDistance()) {
@@ -538,7 +610,7 @@ protected:
                 setCursor(Qt::ClosedHandCursor);
             }
             if (_dragging) {
-                _originMs = std::max(0, _dragStartMs - int(dx / _scale));
+                _originMs = std::clamp(_dragStartMs - int(dx / _scale), 0, maxOriginMs());
                 if (scrollTimeRequested) scrollTimeRequested(_originMs);
                 update();
             }
@@ -611,9 +683,17 @@ protected:
     void wheelEvent(QWheelEvent *e) override {
         if (e->modifiers() & Qt::ControlModifier) {
             const double factor = e->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+            // Keep the time beneath the mouse fixed while zooming.
+            const int x = std::clamp(int(e->position().x()), headerWidth, width());
+            const double anchorMs = _originMs + (x - headerWidth) / _scale;
             _scale = std::clamp(_scale * factor, 0.004, 0.7);
+            _originMs = std::clamp(int(std::round(anchorMs - (x - headerWidth) / _scale)),
+                                   0, maxOriginMs());
+            refreshHorizontalRange();
+            if (scrollTimeRequested) scrollTimeRequested(_originMs);
         } else if (e->modifiers() & Qt::ShiftModifier) {
-            _originMs = std::max(0, _originMs - int(e->angleDelta().y() * 4 / _scale));
+            _originMs = std::clamp(_originMs - int(e->angleDelta().y() * 4 / _scale),
+                                   0, maxOriginMs());
         } else {
             QWidget::wheelEvent(e); // parent scroll area handles vertical wheel
             return;
@@ -632,10 +712,23 @@ private:
     int _regionTrackCount = 0;
     int _selectedRegionId = 0;
 
+    int visibleTimeMs() const {
+        return static_cast<int>(std::ceil(std::max(1, width() - headerWidth) / _scale));
+    }
     int timelineTickAt(int x) const {
         if (!_file) return 0;
-        const int ms = std::max(0, _originMs + int((x - headerWidth) / _scale));
-        return std::max(0, _file->tick(ms));
+        // Use fractional milliseconds instead of truncating the mouse x
+        // position to a full millisecond before converting it to a tick.
+        // The MIDI tick() API accepts integers, so interpolate between
+        // consecutive milliseconds using the actual tempo map.
+        const double target = std::max(0.0, _originMs +
+                                             (x - headerWidth) / _scale);
+        const int loMs = static_cast<int>(std::floor(target));
+        const int hiMs = loMs + 1;
+        const int lowTick = _file->tick(loMs);
+        const int highTick = _file->tick(hiMs);
+        return std::max(0, static_cast<int>(std::lround(
+            lowTick + (target - loMs) * (highTick - lowTick))));
     }
     void splitRegion(int id, int tick) {
         if (!_file) return;
@@ -695,6 +788,8 @@ private:
     bool _timelinePressed = false;
     int _dragX = 0;
     int _dragStartMs = 0;
+    int _hoverTick = -1;
+    int _hoverRow = -1;
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     // Hit targets match the painted buttons. Do not overlap the track name.

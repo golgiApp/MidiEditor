@@ -602,6 +602,21 @@ MainWindow::MainWindow(QString initFile)
     _arrangementWidget = new ArrangementWidget(arrangementArea);
     arrangementArea->setWidget(_arrangementWidget);
     arrangementLayout->addWidget(arrangementArea);
+    // Arrangement timeline scrolls independently of the Piano Roll. The
+    // horizontal bar is directly beneath the region lanes, with its start
+    // aligned to the right edge of the left-hand track controls.
+    auto *arrangementHScroll = new QScrollBar(Qt::Horizontal, arrangementPane);
+    arrangementHScroll->setObjectName(QStringLiteral("xivArrangementHorizontalScroll"));
+    arrangementHScroll->setSingleStep(250);
+    arrangementHScroll->setPageStep(2000);
+    arrangementHScroll->setToolTip(tr("Scroll arrangement regions without moving the Piano Roll"));
+    auto *arrangementScrollRow = new QWidget(arrangementPane);
+    arrangementScrollRow->setFixedHeight(20);
+    auto *arrangementScrollRowLayout = new QHBoxLayout(arrangementScrollRow);
+    arrangementScrollRowLayout->setContentsMargins(ArrangementWidget::headerWidth, 0, 0, 0);
+    arrangementScrollRowLayout->setSpacing(0);
+    arrangementScrollRowLayout->addWidget(arrangementHScroll);
+    arrangementLayout->addWidget(arrangementScrollRow);
     leftSplitter->insertWidget(0, arrangementPane);
     _arrangementWidget->selectTrackRequested = [this](MidiTrack *track) {
         editTrackAndChannel(track);
@@ -689,8 +704,13 @@ MainWindow::MainWindow(QString initFile)
             removeTrack(track->number());
         }
     };
-    _arrangementWidget->scrollTimeRequested = [this](int ms) {
-        if (hori) hori->setValue(ms);
+    _arrangementWidget->scrollTimeRequested = [arrangementHScroll](int ms) {
+        arrangementHScroll->setValue(ms);
+    };
+    _arrangementWidget->scrollRangeChanged = [arrangementHScroll](int maximum, int pageMs) {
+        arrangementHScroll->setRange(0, maximum);
+        arrangementHScroll->setPageStep(std::max(1, pageMs));
+        arrangementHScroll->setSingleStep(std::max(1, pageMs / 16));
     };
     _arrangementWidget->seekTimeRequested = [this](int ms) {
         if (!file || MidiInput::recording()) return;
@@ -710,7 +730,7 @@ MainWindow::MainWindow(QString initFile)
         }
         _matrixWidgetContainer->update();
     };
-    connect(hori, &QScrollBar::valueChanged, _arrangementWidget,
+    connect(arrangementHScroll, &QScrollBar::valueChanged, _arrangementWidget,
             &ArrangementWidget::setOriginMs);
     // MidiPlayer::play() replaces PlayerThread on Windows. Connect its
     // arrangement playhead clock after each Play/Record instead.
