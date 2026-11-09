@@ -1588,6 +1588,7 @@ void MainWindow::save() {
         if (!file->save(file->path())) {
             QMessageBox::warning(this, tr("Error"), QString(tr("The file could not be saved. Please make sure that the destination directory exists and that you have the correct access rights to write into this directory.")));
         } else {
+            if (_arrangementWidget) _arrangementWidget->saveRegionLayout(file->path());
             setWindowModified(false);
         }
     } else {
@@ -1635,6 +1636,7 @@ void MainWindow::saveas() {
             QMessageBox::information(this, tr("Channels/Tracks Mute"), tr("One or more channels/tracks are not audible. They will be audible in the saved file."), QMessageBox::Ok);
         }
 
+        if (_arrangementWidget) _arrangementWidget->saveRegionLayout(newPath);
         file->setPath(newPath);
         setWindowTitle(QApplication::applicationName() + " - " + file->path() + "[*]");
         updateRecentPathsList();

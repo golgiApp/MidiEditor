@@ -23,6 +23,15 @@
 #include <QPointer>
 #include <QToolTip>
 #include <QApplication>
+#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QMenu>
+#include <QDebug>
+#include "../region/MidiRegionModel.h"
 #include <cstdlib>
 #include <functional>
 #include <algorithm>
@@ -67,6 +76,10 @@ public:
         _file = file;
         _selected = nullptr;
         _preview.clear();
+        _regions.clear();
+        _regionsReady = false;
+        _regionTrackCount = 0;
+        _selectedRegionId = 0;
         _solo = nullptr;
         _originMs = 0;
         _dragging = false;
@@ -139,13 +152,64 @@ public:
                 if (!note || !note->track() || !note->offEvent() || note->velocity() == 0) continue;
                 const int begin = _file->msOfTick(note->midiTime());
                 const int end = _file->msOfTick(note->offEvent()->midiTime());
-                _preview[note->track()].append({begin, std::max(end, begin + 1), note->note()});
+                _preview[note->track()].append({begin, std::max(end, begin + 1), note->note(),
+                                                note->midiTime(), note->offEvent()->midiTime()});
             }
         }
         const int count = _file->tracks()->size();
+        // Track-list mutations invalidate index-based sidecar layouts. Reset
+        // instead of applying a split to the wrong instrument.
+        if (!_regionsReady || count != _regionTrackCount) {
+            _regions.clear();
+            _selectedRegionId = 0;
+            for (int i = 0; i < count; ++i) {
+                MidiTrack *track = _file->tracks()->at(i);
+                const auto &notes = _preview[track];
+                if (notes.isEmpty()) continue;
+                int firstTick = notes.first().beginTick;
+                int lastTick = notes.first().endTick;
+                for (const auto &note : notes) {
+                    firstTick = std::min(firstTick, note.beginTick);
+                    lastTick = std::max(lastTick, note.endTick);
+                }
+                _regions.addInitial(i, std::max(0, firstTick), std::max(firstTick + 1, lastTick));
+            }
+            _regionTrackCount = count;
+            if (!_regionsReady) loadRegionLayout();
+            _regionsReady = true;
+        }
         setMinimumHeight(std::max(130, rulerHeight + count * laneHeight));
         updateGeometry();
         update();
+    }
+
+    // MIDI has no region metadata. The native layout is stored separately next
+    // to the MIDI: song.mid.xivms-regions.json. Writes are atomic; never edit
+    // or overwrite the MIDI events as part of region splitting.
+    bool saveRegionLayout(const QString &midiPath = QString()) const {
+        if (!_regionsReady || !_file) return false;
+        const QString path = midiPath.isEmpty() ? _file->path() : midiPath;
+        if (path.trimmed().isEmpty() || !QFileInfo::exists(path)) return false;
+        QJsonObject root;
+        root.insert(QStringLiteral("format"), QStringLiteral("XIV Midi Studio regions"));
+        root.insert(QStringLiteral("version"), 1);
+        root.insert(QStringLiteral("tracks"), _file->tracks()->size());
+        QJsonArray items;
+        for (const xiv::MidiRegion &r : _regions.regions()) {
+            QJsonObject entry;
+            entry.insert(QStringLiteral("id"), r.id);
+            entry.insert(QStringLiteral("track"), r.trackIndex);
+            entry.insert(QStringLiteral("startTick"), r.startTick);
+            entry.insert(QStringLiteral("sourceStartTick"), r.sourceStartTick);
+            entry.insert(QStringLiteral("sourceEndTick"), r.sourceEndTick);
+            items.append(entry);
+        }
+        root.insert(QStringLiteral("regions"), items);
+        QSaveFile output(path + QStringLiteral(".xivms-regions.json"));
+        if (!output.open(QIODevice::WriteOnly)) return false;
+        const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+        if (output.write(bytes) != bytes.size()) { output.cancelWriting(); return false; }
+        return output.commit();
     }
 
 protected:
@@ -233,51 +297,63 @@ protected:
 
             const auto &notes = _preview[t];
             if (notes.isEmpty()) continue;
-            int begin = notes.first().beginMs;
-            int end = notes.first().endMs;
-            int low = 127, high = 0;
-            for (const auto &n : notes) {
-                begin = std::min(begin, n.beginMs);
-                end = std::max(end, n.endMs);
-                low = std::min(low, n.pitch);
-                high = std::max(high, n.pitch);
+            // Draw the arrangement's independent half-open source ranges.
+            // Splits share the same source MIDI, so clipping in tick units
+            // preserves notes that cross the split without duplicating data.
+            for (const auto &region : _regions.regions()) {
+                if (region.trackIndex != i) continue;
+                const int x0 = std::max(headerWidth + 3,
+                    xForMs(_file->msOfTick(region.startTick)));
+                const int x1 = std::min(width() - 2,
+                    xForMs(_file->msOfTick(region.endTick())));
+                if (x1 <= x0) continue;
+                const bool selectedRegion = region.id == _selectedRegionId;
+                QColor accent = c.isValid() ? c : QColor("#7EA4D4");
+                int hue = 0, saturation = 0, lightness = 0, alpha = 255;
+                accent.getHsl(&hue, &saturation, &lightness, &alpha);
+                if (hue >= 0) {
+                    accent.setHsl(hue, std::clamp(saturation, 65, 135),
+                                  std::clamp(lightness, 100, 160));
+                }
+                const QColor noteColor = accent.lighter(145);
+                QColor regionFill = accent;
+                regionFill.setAlpha(selectedRegion ? 83 : (chosen ? 66 : 44));
+                const QRect regionRect(x0, y + 6, x1 - x0, laneHeight - 12);
+                p.fillRect(regionRect, regionFill);
+                p.setBrush(Qt::NoBrush);
+                p.setPen(QPen(selectedRegion ? QColor("#FFD18B") : accent,
+                              selectedRegion ? 2 : 1));
+                p.drawRect(regionRect.adjusted(0, 0, -1, -1));
+                // A small title identifies each selectable region.
+                p.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
+                p.setPen(selectedRegion ? QColor("#FFE0AC") : QColor("#AFBBCB"));
+                p.drawText(regionRect.adjusted(5, 3, -4, -3),
+                           Qt::AlignLeft | Qt::AlignTop,
+                           QStringLiteral("Region %1").arg(region.id));
+                int low = 127, high = 0;
+                for (const auto &n : notes) {
+                    xiv::ProjectedNote clipped;
+                    if (xiv::projectNote(region, n.beginTick, n.endTick, clipped)) {
+                        low = std::min(low, n.pitch);
+                        high = std::max(high, n.pitch);
+                    }
+                }
+                const int range = std::max(1, high - low);
+                p.setPen(Qt::NoPen);
+                p.setBrush(noteColor);
+                for (const auto &n : notes) {
+                    xiv::ProjectedNote clipped;
+                    if (!xiv::projectNote(region, n.beginTick, n.endTick, clipped)) continue;
+                    const int sx = std::max(x0 + 1,
+                        xForMs(_file->msOfTick(clipped.startTick)));
+                    const int ex = std::min(x1 - 1,
+                        xForMs(_file->msOfTick(clipped.endTick)));
+                    if (ex <= sx) continue;
+                    const int ny = y + 96 - ((n.pitch - low) * 62 / range);
+                    p.drawRect(QRect(sx, ny, std::max(1, ex - sx), 4));
+                }
+                p.setBrush(Qt::NoBrush);
             }
-            const int x0 = std::max(headerWidth + 3, xForMs(begin));
-            const int x1 = std::min(width() - 2, xForMs(end));
-            if (x1 <= x0) continue;
-            // Keep the track's stored color intact, but tone down the
-            // arrangement presentation so saturated source colors don't
-            // become opaque, hard-to-read blocks on the dark canvas.
-            QColor accent = c.isValid() ? c : QColor("#7EA4D4");
-            int hue = 0, saturation = 0, lightness = 0, alpha = 255;
-            accent.getHsl(&hue, &saturation, &lightness, &alpha);
-            if (hue >= 0) {
-                accent.setHsl(hue, std::clamp(saturation, 65, 135),
-                              std::clamp(lightness, 100, 160));
-            }
-            QColor noteColor = accent;
-            noteColor = noteColor.lighter(145);
-            QColor regionFill = accent;
-            regionFill.setAlpha(chosen ? 66 : 44);
-            const QRect regionRect(x0, y + 6, x1 - x0, laneHeight - 12);
-            p.fillRect(regionRect, regionFill);
-            // A previous lane leaves the painter's brush set to a solid note
-            // color. Explicitly disable it before drawing the next outline.
-            // Otherwise drawRect fills the entire region with that solid color.
-            p.setBrush(Qt::NoBrush);
-            p.setPen(QPen(accent, chosen ? 2 : 1));
-            p.drawRect(regionRect.adjusted(0, 0, -1, -1));
-            p.setPen(Qt::NoPen);
-            p.setBrush(noteColor);
-            const int range = std::max(1, high - low);
-            for (const auto &n : notes) {
-                const int sx = std::max(x0 + 1, xForMs(n.beginMs));
-                const int ex = std::min(x1 - 1, xForMs(n.endMs));
-                if (ex < x0 || sx >= x1 || ex <= sx) continue;
-                const int ny = y + 90 - ((n.pitch - low) * 66 / range);
-                p.drawRect(QRect(sx, ny, std::max(1, ex - sx), 4));
-            }
-            p.setBrush(Qt::NoBrush);
         }
 
         // Draw the header boundary first, then put the bright playback line on
@@ -316,6 +392,32 @@ protected:
     }
 
     void contextMenuEvent(QContextMenuEvent *e) override {
+        if (_file && e->pos().x() >= headerWidth && e->pos().y() >= rulerHeight) {
+            const QPoint pos = e->pos();
+            const int row = (pos.y() - rulerHeight) / laneHeight;
+            const int tick = timelineTickAt(pos.x());
+            const auto *region = _regions.at(row, tick);
+            if (region && row >= 0 && row < _file->tracks()->size()) {
+                const int id = region->id;
+                _selectedRegionId = id;
+                MidiTrack *track = _file->tracks()->at(row);
+                setSelectedTrack(track);
+                if (selectTrackRequested) selectTrackRequested(track);
+                QMenu menu(this);
+                QAction *splitHere = menu.addAction(tr("Split Region Here"));
+                splitHere->setEnabled(tick > region->startTick && tick < region->endTick());
+                const int cursorTick = _file->cursorTick();
+                QAction *splitAtCursor = menu.addAction(tr("Split Region at Playhead"));
+                splitAtCursor->setEnabled(cursorTick > region->startTick &&
+                                          cursorTick < region->endTick());
+                QAction *chosen = menu.exec(e->globalPos());
+                if (chosen == splitHere) splitRegion(id, tick);
+                else if (chosen == splitAtCursor) splitRegion(id, cursorTick);
+                update();
+                e->accept();
+                return;
+            }
+        }
         if (_file && e->pos().x() < headerWidth && e->pos().y() >= rulerHeight) {
             const int row = (e->pos().y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
@@ -398,8 +500,23 @@ protected:
             }
         }
 
-        // Pressing the timeline does not seek yet: wait for release so a
-        // click moves the playhead and a drag pans without accidentally seeking.
+        // A click on a real MIDI region selects it; a blank timeline click
+        // still seeks and a drag across empty space still pans the view.
+        if (pos.x() >= headerWidth && pos.y() >= rulerHeight) {
+            const int row = (pos.y() - rulerHeight) / laneHeight;
+            const xiv::MidiRegion *r = _regions.at(row, timelineTickAt(pos.x()));
+            if (r && row >= 0 && row < _file->tracks()->size()) {
+                _selectedRegionId = r->id;
+                MidiTrack *track = _file->tracks()->at(row);
+                setSelectedTrack(track);
+                if (selectTrackRequested) selectTrackRequested(track);
+                update();
+                e->accept();
+                return;
+            }
+        }
+        // Pressing the blank timeline does not seek yet: wait for release
+        // so a click seeks and a drag pans without accidentally seeking.
         if (pos.x() >= headerWidth) {
             _timelinePressed = true;
             _dragging = false;
@@ -507,7 +624,66 @@ protected:
     }
 
 private:
-    struct PreviewNote { int beginMs; int endMs; int pitch; };
+    struct PreviewNote {
+        int beginMs, endMs, pitch, beginTick, endTick;
+    };
+    xiv::MidiRegionModel _regions;
+    bool _regionsReady = false;
+    int _regionTrackCount = 0;
+    int _selectedRegionId = 0;
+
+    int timelineTickAt(int x) const {
+        if (!_file) return 0;
+        const int ms = std::max(0, _originMs + int((x - headerWidth) / _scale));
+        return std::max(0, _file->tick(ms));
+    }
+    void splitRegion(int id, int tick) {
+        if (!_file) return;
+        const int newId = _regions.split(id, tick);
+        if (!newId) return;
+        _selectedRegionId = newId;
+        // Persist only the region metadata; note contents remain unmodified.
+        if (!_file->path().isEmpty() && QFileInfo::exists(_file->path()) &&
+            !saveRegionLayout()) {
+            qWarning() << "XIV Midi Studio: could not save region sidecar";
+            QToolTip::showText(mapToGlobal(QPoint(headerWidth + 12, rulerHeight + 8)),
+                tr("The region split is in memory, but its sidecar could not be saved."), this);
+        }
+        update();
+    }
+    void loadRegionLayout() {
+        if (!_file || _file->path().trimmed().isEmpty()) return;
+        QFile input(_file->path() + QStringLiteral(".xivms-regions.json"));
+        if (!input.exists() || !input.open(QIODevice::ReadOnly)) return;
+        QJsonParseError error;
+        const QJsonDocument doc = QJsonDocument::fromJson(input.readAll(), &error);
+        if (error.error != QJsonParseError::NoError || !doc.isObject()) return;
+        const QJsonObject root = doc.object();
+        if (root.value(QStringLiteral("format")).toString() !=
+                QStringLiteral("XIV Midi Studio regions") ||
+            root.value(QStringLiteral("version")).toInt() != 1 ||
+            root.value(QStringLiteral("tracks")).toInt(-1) != _file->tracks()->size()) return;
+        const QJsonValue jsonRegions = root.value(QStringLiteral("regions"));
+        if (!jsonRegions.isArray()) return;
+        std::vector<xiv::MidiRegion> incoming;
+        for (const QJsonValue &value : jsonRegions.toArray()) {
+            if (!value.isObject()) return;
+            const QJsonObject o = value.toObject();
+            if (!o.value(QStringLiteral("id")).isDouble() ||
+                !o.value(QStringLiteral("track")).isDouble() ||
+                !o.value(QStringLiteral("startTick")).isDouble() ||
+                !o.value(QStringLiteral("sourceStartTick")).isDouble() ||
+                !o.value(QStringLiteral("sourceEndTick")).isDouble()) return;
+            incoming.push_back({o.value(QStringLiteral("id")).toInt(),
+                                o.value(QStringLiteral("track")).toInt(-1),
+                                o.value(QStringLiteral("startTick")).toInt(-1),
+                                o.value(QStringLiteral("sourceStartTick")).toInt(-1),
+                                o.value(QStringLiteral("sourceEndTick")).toInt(-1)});
+        }
+        if (!_regions.replaceValidated(incoming, _file->tracks()->size()))
+            qWarning() << "XIV Midi Studio: invalid region sidecar ignored";
+    }
+
     QPointer<MidiFile> _file;
     MidiTrack *_selected = nullptr;
     MidiTrack *_solo = nullptr;
