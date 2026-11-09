@@ -20,6 +20,8 @@
 #include <QPolygon>
 #include <QPointer>
 #include <QToolTip>
+#include <QMenu>
+#include <QContextMenuEvent>
 #include <QApplication>
 #include <cstdlib>
 #include <functional>
@@ -41,6 +43,7 @@ public:
     }
 
     std::function<void(MidiTrack *)> selectTrackRequested;
+    std::function<void(MidiTrack *)> soundFontPresetRequested;
     std::function<void(int)> scrollTimeRequested;
     // Commit a clicked time to the actual MIDI transport cursor, not just
     // the arrangement drawing. The owner handles playback/pause state.
@@ -59,6 +62,7 @@ public:
         _file = file;
         _selected = nullptr;
         _preview.clear();
+        _trackPresetLabels.clear();
         _solo = nullptr;
         _originMs = 0;
         _dragging = false;
@@ -80,6 +84,9 @@ public:
         update();
     }
     MidiTrack *selectedTrack() const { return _selected; }
+    void setTrackPresetLabel(MidiTrack *track, const QString &label) {
+        if (track) { _trackPresetLabels.insert(track, label); update(); }
+    }
 
     // Playback and the Piano Roll receive the same MIDI player clock.
     // Scroll only when necessary so the cursor stays visible across all lanes.
@@ -204,7 +211,9 @@ protected:
             QFontMetrics fm(p.font());
             p.drawText(13, y + 22, fm.elidedText(name, Qt::ElideRight, 112));
             p.setPen(QColor("#929BAA"));
-            p.drawText(13, y + 42, QStringLiteral("Track %1").arg(i + 1));
+            const QString currentSound = _trackPresetLabels.value(t, tr("SoundFont…"));
+            drawButton(p, soundRect(y), fm.elidedText(currentSound, Qt::ElideRight, 100),
+                       _trackPresetLabels.contains(t), QColor("#587D99"));
 
             drawButton(p, muteRect(y), QStringLiteral("M"), t->muted(), QColor("#B75B61"));
             drawButton(p, soloRect(y), QStringLiteral("S"), t == _solo, QColor("#C4A45A"));
@@ -285,7 +294,12 @@ protected:
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
-                if (muteRect(rulerHeight + row * laneHeight).contains(pos)) {
+                if (soundRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    setSelectedTrack(track);
+                    if (selectTrackRequested) selectTrackRequested(track);
+                    if (soundFontPresetRequested) soundFontPresetRequested(track);
+                    update();
+                } else if (muteRect(rulerHeight + row * laneHeight).contains(pos)) {
                     _file->protocol()->startNewAction(track->muted() ? tr("Unmute Track") : tr("Mute Track"));
                     track->setMuted(!track->muted());
                     _file->protocol()->endAction();
@@ -315,6 +329,24 @@ protected:
             return;
         }
         QWidget::mousePressEvent(e);
+    }
+
+    void contextMenuEvent(QContextMenuEvent *e) override {
+        if (!_file || e->pos().x() >= headerWidth || e->pos().y() < rulerHeight) {
+            QWidget::contextMenuEvent(e);
+            return;
+        }
+        const int row = (e->pos().y() - rulerHeight) / laneHeight;
+        if (row < 0 || row >= _file->tracks()->size()) return;
+        MidiTrack *track = _file->tracks()->at(row);
+        QMenu menu(this);
+        QAction *soundAction = menu.addAction(tr("Choose SoundFont Preset…"));
+        if (menu.exec(e->globalPos()) == soundAction && soundFontPresetRequested) {
+            setSelectedTrack(track);
+            if (selectTrackRequested) selectTrackRequested(track);
+            soundFontPresetRequested(track);
+        }
+        e->accept();
     }
 
     void mouseMoveEvent(QMouseEvent *e) override {
@@ -392,6 +424,7 @@ private:
     MidiTrack *_selected = nullptr;
     MidiTrack *_solo = nullptr;
     QHash<MidiTrack *, QVector<PreviewNote>> _preview;
+    QHash<MidiTrack *, QString> _trackPresetLabels;
     int _originMs = 0;
     int _playheadMs = -1;
     double _scale = 0.065; // pixels per millisecond
@@ -401,6 +434,7 @@ private:
     int _dragStartMs = 0;
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
+    QRect soundRect(int y) const { return QRect(12, y + 29, 108, 19); }
     QRect muteRect(int y) const { return QRect(130, y + 16, 25, 24); }
     QRect soloRect(int y) const { return QRect(160, y + 16, 25, 24); }
     static void drawButton(QPainter &p, const QRect &r, const QString &label,

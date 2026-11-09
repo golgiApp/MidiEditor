@@ -63,6 +63,9 @@
 #include "FileLengthDialog.h"
 #include "TrimStartDialog.h"
 #include "InstrumentChooser.h"
+#include "SoundFontPresetPicker.h"
+#include "../MidiEvent/ControlChangeEvent.h"
+#include <QSet>
 #include "../midi/InstrumentDefinitions.h"
 #include "LayoutSettingsWidget.h"
 #include "SplitChannelsDialog.h"
@@ -503,6 +506,9 @@ MainWindow::MainWindow(QString initFile)
     _arrangementWidget->selectTrackRequested = [this](MidiTrack *track) {
         editTrackAndChannel(track);
     };
+    _arrangementWidget->soundFontPresetRequested = [this](MidiTrack *track) {
+        chooseSoundFontForTrack(track);
+    };
     _arrangementWidget->scrollTimeRequested = [this](int ms) {
         if (hori) hori->setValue(ms);
     };
@@ -914,6 +920,10 @@ void MainWindow::setFile(MidiFile *newFile) {
     // Store reference to old file for cleanup
     MidiFile *oldFile = this->file;
 
+#ifdef FLUIDSYNTH_SUPPORT
+    // Do not carry transient SoundFont preview overrides into another song.
+    FluidSynthEngine::instance()->clearChannelPresets();
+#endif
     EventTool::clearSelection();
     Selection::setFile(newFile);
 
@@ -3991,6 +4001,111 @@ void MainWindow::editTrackAndChannel(MidiTrack *track) {
     }
 
     editChannel(focusCh, false);
+}
+
+void MainWindow::chooseSoundFontForTrack(MidiTrack *track) {
+#ifdef FLUIDSYNTH_SUPPORT
+    if (!file || !track || !file->tracks()->contains(track)) return;
+    if (!MidiOutput::isFluidSynthOutput()) {
+        QMessageBox::information(this, tr("SoundFont Presets"),
+            tr("Choose FluidSynth (Built-in Synthesizer) as your MIDI output first. "
+               "SoundFont presets are available only through FluidSynth."));
+        return;
+    }
+    auto *engine = FluidSynthEngine::instance();
+    const auto presets = engine->availablePresets();
+    if (presets.isEmpty()) {
+        QMessageBox::information(this, tr("No SoundFont Presets"),
+            tr("No presets are loaded yet. Enable a SoundFont in MIDI settings, "
+               "allow it to finish loading, then open the SoundFont browser again."));
+        return;
+    }
+
+    SoundFontPresetPicker dialog(track->name(), presets, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const auto selected = dialog.selectedPreset();
+
+    // MIDI program, bank and SoundFont selections are channel properties.
+    // Derive the channel from notes rather than trusting an outdated default.
+    QSet<int> trackChannels;
+    QSet<MidiTrack *> sharedTracks;
+    for (int ch = 0; ch < 16; ++ch) {
+        const auto *events = file->channelEvents(ch);
+        for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || note->velocity() <= 0) continue;
+            if (note->track() == track) trackChannels.insert(ch);
+        }
+    }
+    int channel = -1;
+    if (!trackChannels.isEmpty())
+        channel = *std::min_element(trackChannels.cbegin(), trackChannels.cend());
+    else channel = track->assignedChannel();
+    if (channel < 0 || channel >= 16) {
+        QMessageBox::warning(this, tr("SoundFont Presets"),
+            tr("Cannot determine a valid MIDI channel for this track."));
+        return;
+    }
+    if (trackChannels.size() > 1) {
+        QMessageBox::information(this, tr("Track Uses Multiple MIDI Channels"),
+            tr("This track uses %1 channels. Only channel %2 will be changed. "
+               "Split the track by channel to assign independent sounds.")
+               .arg(trackChannels.size()).arg(channel + 1));
+    }
+    const auto *events = file->channelEvents(channel);
+    for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
+        auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+        if (note && note->velocity() > 0 && note->track() && note->track() != track)
+            sharedTracks.insert(note->track());
+    }
+    if (!sharedTracks.isEmpty()) {
+        const auto answer = QMessageBox::warning(this, tr("Shared MIDI Channel"),
+            tr("This track shares MIDI channel %1 with %2 other track(s). "
+               "MIDI instruments are channel-based, so the selected preset "
+               "will also affect those tracks. Continue?")
+               .arg(channel + 1).arg(sharedTracks.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+    }
+    if (!engine->setChannelPreset(channel, selected)) {
+        QMessageBox::warning(this, tr("SoundFont Not Available"),
+            tr("The SoundFont is no longer loaded. Check your SoundFont settings and retry."));
+        return;
+    }
+
+    if (dialog.writeMidiAssignment()) {
+        // Stop playback before modifying MIDI events. These channel
+        // messages are portable; the exact SoundFont path is not.
+        if (MidiPlayer::isPlaying()) stop();
+        MidiChannel *midiChannel = file->channel(channel);
+        QList<MidiEvent *> superseded;
+        for (auto *ev : midiChannel->eventMap()->values()) {
+            if (ev->track() != track) continue;
+            if (dynamic_cast<ProgChangeEvent *>(ev)) {
+                superseded.append(ev);
+            } else if (auto *cc = dynamic_cast<ControlChangeEvent *>(ev)) {
+                if (cc->control() == 0 || cc->control() == 32) superseded.append(ev);
+            }
+        }
+        file->protocol()->startNewAction(tr("Set SoundFont Bank and Program"));
+        for (auto *ev : superseded) midiChannel->removeEvent(ev);
+        // Bank Select MSB, Bank Select LSB, then Program Change at tick zero.
+        // Bank > 127 is represented as the standard 14-bit MIDI bank value.
+        const int bank = std::clamp(selected.bank, 0, 16383);
+        midiChannel->insertEvent(new ControlChangeEvent(channel, 0, (bank >> 7) & 0x7F, track), 0);
+        midiChannel->insertEvent(new ControlChangeEvent(channel, 32, bank & 0x7F, track), 0);
+        midiChannel->insertEvent(new ProgChangeEvent(channel, selected.program, track), 0);
+        file->protocol()->endAction();
+    }
+    if (_arrangementWidget)
+        _arrangementWidget->setTrackPresetLabel(track, selected.name);
+    statusBar()->showMessage(tr("SoundFont preview: %1 (bank %2, program %3) on MIDI channel %4")
+        .arg(selected.name).arg(selected.bank).arg(selected.program).arg(channel + 1), 8000);
+#else
+    Q_UNUSED(track);
+    QMessageBox::information(this, tr("SoundFont Presets"),
+        tr("This build does not include FluidSynth."));
+#endif
 }
 
 void MainWindow::setInstrumentForChannel(int channel) {

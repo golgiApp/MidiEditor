@@ -192,6 +192,7 @@ void FluidSynthEngine::shutdown() {
     }
 
     _initialized = false;
+    _channelPresets.clear();
     qDebug() << "FluidSynth engine shut down";
 }
 
@@ -395,6 +396,49 @@ void FluidSynthEngine::setSoundFontStack(const QStringList &paths) {
 // MIDI Message Routing
 // ============================================================================
 
+QVector<FluidSynthEngine::PresetInfo> FluidSynthEngine::availablePresets() const {
+    QMutexLocker locker(&_engineMutex);
+    QVector<PresetInfo> result;
+    if (!_initialized || !_synth) return result;
+
+    for (const auto &font : _loadedFonts) {
+        fluid_sfont_t *sfont = fluid_synth_get_sfont_by_id(_synth, font.first);
+        if (!sfont) continue;
+        fluid_sfont_iteration_start(sfont);
+        while (fluid_preset_t *preset = fluid_sfont_iteration_next(sfont)) {
+            PresetInfo item;
+            item.soundFontId = font.first;
+            item.soundFontPath = font.second;
+            const char *presetName = fluid_preset_get_name(preset);
+            item.name = QString::fromUtf8(presetName ? presetName : "(unnamed)");
+            item.bank = fluid_preset_get_banknum(preset);
+            item.program = fluid_preset_get_num(preset);
+            result.append(item);
+        }
+    }
+    return result;
+}
+
+bool FluidSynthEngine::setChannelPreset(int channel, const PresetInfo &preset) {
+    QMutexLocker locker(&_engineMutex);
+    if (!_initialized || !_synth || channel < 0 || channel >= 16) return false;
+    // Never trust a stale FluidSynth SoundFont ID following a stack reload.
+    int fontId = -1;
+    for (const auto &font : _loadedFonts) {
+        if (font.second == preset.soundFontPath) { fontId = font.first; break; }
+    }
+    if (fontId < 0) return false;
+    if (fluid_synth_program_select(_synth, channel, fontId, preset.bank, preset.program) != FLUID_OK)
+        return false;
+    _channelPresets.insert(channel, preset);
+    return true;
+}
+
+void FluidSynthEngine::clearChannelPresets() {
+    QMutexLocker locker(&_engineMutex);
+    _channelPresets.clear();
+}
+
 void FluidSynthEngine::sendMidiData(const QByteArray &data) {
     QMutexLocker locker(&_engineMutex);
     if (!_initialized || !_synth || data.isEmpty()) {
@@ -442,6 +486,17 @@ void FluidSynthEngine::sendMidiData(const QByteArray &data) {
 
     case 0xC0: // Program Change
         if (data.size() >= 2) {
+            auto override = _channelPresets.constFind(channel);
+            if (override != _channelPresets.cend()) {
+                int soundFontId = -1;
+                for (const auto &font : _loadedFonts) {
+                    if (font.second == override->soundFontPath) { soundFontId = font.first; break; }
+                }
+                if (soundFontId >= 0 &&
+                    fluid_synth_program_select(_synth, channel, soundFontId,
+                                               override->bank, override->program) == FLUID_OK)
+                    break;
+            }
             int program = static_cast<unsigned char>(data[1]);
             fluid_synth_program_change(_synth, channel, program);
         }
@@ -451,6 +506,7 @@ void FluidSynthEngine::sendMidiData(const QByteArray &data) {
         if (data.size() >= 3) {
             int ctrl = static_cast<unsigned char>(data[1]);
             int value = static_cast<unsigned char>(data[2]);
+            if (_channelPresets.contains(channel) && (ctrl == 0 || ctrl == 32)) break;
             fluid_synth_cc(_synth, channel, ctrl, value);
         }
         break;
