@@ -329,8 +329,21 @@ void TrackListWidget::contextMenuEvent(QContextMenuEvent *event) {
     if (index < 0 || index >= trackorder.size()) return;
 
     MidiTrack *track = trackorder.at(index);
+    showTrackContextMenu(track, event->globalPos());
+}
+
+void TrackListWidget::showTrackContextMenu(MidiTrack *track, const QPoint &globalPos) {
+    if (!file || !track || !file->tracks()->contains(track)) return;
 
     QMenu menu(this);
+
+    // Core controls previously present only in the right-side Track list.
+    QAction *renameAction = menu.addAction(tr("Rename Track..."));
+    QAction *removeAction = menu.addAction(tr("Remove Track"));
+    QAction *visibilityAction = menu.addAction(track->hidden() ?
+        tr("Show Track in Piano Roll") : tr("Hide Track in Piano Roll"));
+    QAction *audibilityAction = menu.addAction(track->muted() ? tr("Unmute Track") : tr("Mute Track"));
+    menu.addSeparator();
     
     // Group 1: Track Management
     QAction *cloneAction = menu.addAction(tr("Clone Track"));
@@ -395,9 +408,21 @@ void TrackListWidget::contextMenuEvent(QContextMenuEvent *event) {
 
     QAction *clearAction = menu.addAction(tr("Remove Events"));
 
-    QAction *selectedAction = menu.exec(event->globalPos());
+    QAction *selectedAction = menu.exec(globalPos);
 
-    if (selectedAction == cloneAction) {
+    if (selectedAction == renameAction) {
+        emit trackRenameClicked(track->number());
+    } else if (selectedAction == removeAction) {
+        emit trackRemoveClicked(track->number());
+    } else if (selectedAction == visibilityAction) {
+        file->protocol()->startNewAction(track->hidden() ? tr("Show Track") : tr("Hide Track"));
+        track->setHidden(!track->hidden());
+        file->protocol()->endAction();
+    } else if (selectedAction == audibilityAction) {
+        file->protocol()->startNewAction(track->muted() ? tr("Unmute Track") : tr("Mute Track"));
+        track->setMuted(!track->muted());
+        file->protocol()->endAction();
+    } else if (selectedAction == cloneAction) {
         emit cloneTrackRequested(track);
     } else if (mergeMenu->actions().contains(selectedAction)) {
         MidiTrack *dest = (MidiTrack*)selectedAction->data().value<void*>();

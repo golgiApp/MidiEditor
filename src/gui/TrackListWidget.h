@@ -116,6 +116,11 @@ public:
      */
     MidiFile *midiFile();
 
+    /** Reuse the full legacy track action menu from the arrangement header.
+     *  The old list is kept as an action controller but no longer displayed.
+     */
+    void showTrackContextMenu(MidiTrack *track, const QPoint &globalPos);
+
 signals:
     /**
      * \brief Emitted when track rename is requested.

@@ -11,6 +11,8 @@
 #include <QWidget>
 #include <QPainter>
 #include <QMouseEvent>
+#include <QContextMenuEvent>
+#include <QPoint>
 #include <QWheelEvent>
 #include <QHash>
 #include <QVector>
@@ -20,8 +22,6 @@
 #include <QPolygon>
 #include <QPointer>
 #include <QToolTip>
-#include <QMenu>
-#include <QContextMenuEvent>
 #include <QApplication>
 #include <cstdlib>
 #include <functional>
@@ -43,7 +43,10 @@ public:
     }
 
     std::function<void(MidiTrack *)> selectTrackRequested;
-    std::function<void(MidiTrack *)> soundFontPresetRequested;
+    std::function<void(MidiTrack *, const QPoint &)> trackMenuRequested;
+    std::function<void(MidiTrack *)> renameTrackRequested;
+    std::function<void(MidiTrack *)> cloneTrackRequested;
+    std::function<void(MidiTrack *)> removeTrackRequested;
     std::function<void(int)> scrollTimeRequested;
     // Commit a clicked time to the actual MIDI transport cursor, not just
     // the arrangement drawing. The owner handles playback/pause state.
@@ -54,15 +57,14 @@ public:
         ms = std::max(0, ms);
         if (ms != _originMs) { _originMs = ms; update(); }
     }
-    static constexpr int headerWidth = 190;
+    static constexpr int headerWidth = 305;
     static constexpr int rulerHeight = 32;
-    static constexpr int laneHeight = 55;
+    static constexpr int laneHeight = 82;
 
     void setFile(MidiFile *file) {
         _file = file;
         _selected = nullptr;
         _preview.clear();
-        _trackPresetLabels.clear();
         _solo = nullptr;
         _originMs = 0;
         _dragging = false;
@@ -84,9 +86,6 @@ public:
         update();
     }
     MidiTrack *selectedTrack() const { return _selected; }
-    void setTrackPresetLabel(MidiTrack *track, const QString &label) {
-        if (track) { _trackPresetLabels.insert(track, label); update(); }
-    }
 
     // Playback and the Piano Roll receive the same MIDI player clock.
     // Scroll only when necessary so the cursor stays visible across all lanes.
@@ -158,7 +157,7 @@ protected:
         p.setFont(QFont(QStringLiteral("Segoe UI"), 9));
         p.setPen(QColor("#CBD2DF"));
         p.drawText(QRect(12, 0, headerWidth - 15, rulerHeight), Qt::AlignVCenter,
-                   QStringLiteral("TRACKS   |   Click to seek / Drag to pan"));
+                   QStringLiteral("TRACKS  |  + Add above  |  ••• More actions"));
         if (!_file) {
             p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, 60),
                        Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("Open a MIDI file"));
@@ -209,14 +208,21 @@ protected:
             const QString name = t->name().trimmed().isEmpty() ?
                                  QStringLiteral("Track %1").arg(i) : t->name();
             QFontMetrics fm(p.font());
-            p.drawText(13, y + 22, fm.elidedText(name, Qt::ElideRight, 112));
+            p.drawText(13, y + 23, fm.elidedText(name, Qt::ElideRight, headerWidth - 27));
             p.setPen(QColor("#929BAA"));
-            const QString currentSound = _trackPresetLabels.value(t, tr("SoundFont…"));
-            drawButton(p, soundRect(y), fm.elidedText(currentSound, Qt::ElideRight, 100),
-                       _trackPresetLabels.contains(t), QColor("#587D99"));
+            p.drawText(13, y + 41, QStringLiteral("Track %1  ·  Ch %2")
+                       .arg(i + 1).arg(t->assignedChannel() + 1));
 
+            // All track controls live here, alongside the arrangement lane.
+            // The ellipsis opens the complete legacy track menu (merge, move,
+            // quantize, transpose, explode, FFXIV chord filters, etc.).
+            drawButton(p, visibilityRect(y), QStringLiteral("V"), !t->hidden(), QColor("#5186AE"));
             drawButton(p, muteRect(y), QStringLiteral("M"), t->muted(), QColor("#B75B61"));
             drawButton(p, soloRect(y), QStringLiteral("S"), t == _solo, QColor("#C4A45A"));
+            drawButton(p, renameRect(y), QStringLiteral("R"), false, QColor("#7D899B"));
+            drawButton(p, cloneRect(y), QStringLiteral("C"), false, QColor("#7D899B"));
+            drawButton(p, removeRect(y), QStringLiteral("×"), false, QColor("#7D899B"));
+            drawButton(p, actionsRect(y), QStringLiteral("•••"), false, QColor("#7D899B"));
 
             const auto &notes = _preview[t];
             if (notes.isEmpty()) continue;
@@ -284,6 +290,36 @@ protected:
         }
     }
 
+    void contextMenuEvent(QContextMenuEvent *e) override {
+        if (_file && e->pos().x() < headerWidth && e->pos().y() >= rulerHeight) {
+            const int row = (e->pos().y() - rulerHeight) / laneHeight;
+            if (row >= 0 && row < _file->tracks()->size()) {
+                MidiTrack *track = _file->tracks()->at(row);
+                setSelectedTrack(track);
+                if (selectTrackRequested) selectTrackRequested(track);
+                if (trackMenuRequested) trackMenuRequested(track, e->globalPos());
+                e->accept();
+                return;
+            }
+        }
+        QWidget::contextMenuEvent(e);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *e) override {
+        if (_file && e->button() == Qt::LeftButton && e->position().x() < headerWidth &&
+            e->position().y() >= rulerHeight &&
+            (int(e->position().y()) - rulerHeight) % laneHeight < 31) {
+            const int row = (int(e->position().y()) - rulerHeight) / laneHeight;
+            if (row >= 0 && row < _file->tracks()->size()) {
+                MidiTrack *track = _file->tracks()->at(row);
+                if (renameTrackRequested) renameTrackRequested(track);
+                e->accept();
+                return;
+            }
+        }
+        QWidget::mouseDoubleClickEvent(e);
+    }
+
     void mousePressEvent(QMouseEvent *e) override {
         if (!_file || e->button() != Qt::LeftButton) {
             QWidget::mousePressEvent(e);
@@ -294,11 +330,27 @@ protected:
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
-                if (soundRect(rulerHeight + row * laneHeight).contains(pos)) {
+                if (visibilityRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    _file->protocol()->startNewAction(track->hidden() ? tr("Show Track") : tr("Hide Track"));
+                    track->setHidden(!track->hidden());
+                    _file->protocol()->endAction();
+                    update();
+                } else if (actionsRect(rulerHeight + row * laneHeight).contains(pos)) {
                     setSelectedTrack(track);
                     if (selectTrackRequested) selectTrackRequested(track);
-                    if (soundFontPresetRequested) soundFontPresetRequested(track);
-                    update();
+                    if (trackMenuRequested) trackMenuRequested(track, mapToGlobal(pos));
+                } else if (renameRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    setSelectedTrack(track);
+                    if (selectTrackRequested) selectTrackRequested(track);
+                    if (renameTrackRequested) renameTrackRequested(track);
+                } else if (cloneRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    setSelectedTrack(track);
+                    if (selectTrackRequested) selectTrackRequested(track);
+                    if (cloneTrackRequested) cloneTrackRequested(track);
+                } else if (removeRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    setSelectedTrack(track);
+                    if (selectTrackRequested) selectTrackRequested(track);
+                    if (removeTrackRequested) removeTrackRequested(track);
                 } else if (muteRect(rulerHeight + row * laneHeight).contains(pos)) {
                     _file->protocol()->startNewAction(track->muted() ? tr("Unmute Track") : tr("Mute Track"));
                     track->setMuted(!track->muted());
@@ -331,24 +383,6 @@ protected:
         QWidget::mousePressEvent(e);
     }
 
-    void contextMenuEvent(QContextMenuEvent *e) override {
-        if (!_file || e->pos().x() >= headerWidth || e->pos().y() < rulerHeight) {
-            QWidget::contextMenuEvent(e);
-            return;
-        }
-        const int row = (e->pos().y() - rulerHeight) / laneHeight;
-        if (row < 0 || row >= _file->tracks()->size()) return;
-        MidiTrack *track = _file->tracks()->at(row);
-        QMenu menu(this);
-        QAction *soundAction = menu.addAction(tr("Choose SoundFont Preset…"));
-        if (menu.exec(e->globalPos()) == soundAction && soundFontPresetRequested) {
-            setSelectedTrack(track);
-            if (selectTrackRequested) selectTrackRequested(track);
-            soundFontPresetRequested(track);
-        }
-        e->accept();
-    }
-
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
         if (_timelinePressed) {
@@ -365,6 +399,30 @@ protected:
             e->accept();
             return;
         }
+        if (_file && pos.x() < headerWidth && pos.y() >= rulerHeight) {
+            const int row = (pos.y() - rulerHeight) / laneHeight;
+            if (row >= 0 && row < _file->tracks()->size()) {
+                const int top = rulerHeight + row * laneHeight;
+                QString tooltip;
+                if (visibilityRect(top).contains(pos)) tooltip = tr("Show / hide track notes in Piano Roll");
+                else if (muteRect(top).contains(pos)) tooltip = tr("Mute / unmute track during playback");
+                else if (soloRect(top).contains(pos)) tooltip = tr("Solo track during playback");
+                else if (renameRect(top).contains(pos)) tooltip = tr("Rename track");
+                else if (cloneRect(top).contains(pos)) tooltip = tr("Clone track");
+                else if (removeRect(top).contains(pos)) tooltip = tr("Delete track");
+                else if (actionsRect(top).contains(pos)) tooltip = tr("All track actions: merge, move, quantize, transpose, FFXIV chord filter, split, select and more");
+                if (!tooltip.isEmpty()) {
+                    setCursor(Qt::PointingHandCursor);
+                    QToolTip::showText(e->globalPosition().toPoint(), tooltip, this);
+                } else {
+                    QToolTip::hideText();
+                    setCursor(Qt::ArrowCursor);
+                }
+                QWidget::mouseMoveEvent(e);
+                return;
+            }
+        }
+        QToolTip::hideText();
         if (pos.x() >= headerWidth) {
             setCursor(pos.y() < rulerHeight ? Qt::PointingHandCursor : Qt::OpenHandCursor);
         } else {
@@ -424,7 +482,6 @@ private:
     MidiTrack *_selected = nullptr;
     MidiTrack *_solo = nullptr;
     QHash<MidiTrack *, QVector<PreviewNote>> _preview;
-    QHash<MidiTrack *, QString> _trackPresetLabels;
     int _originMs = 0;
     int _playheadMs = -1;
     double _scale = 0.065; // pixels per millisecond
@@ -434,9 +491,14 @@ private:
     int _dragStartMs = 0;
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
-    QRect soundRect(int y) const { return QRect(12, y + 29, 108, 19); }
-    QRect muteRect(int y) const { return QRect(130, y + 16, 25, 24); }
-    QRect soloRect(int y) const { return QRect(160, y + 16, 25, 24); }
+    // Hit targets match the painted buttons. Do not overlap the track name.
+    QRect visibilityRect(int y) const { return QRect(12, y + 49, 32, 25); }
+    QRect muteRect(int y) const { return QRect(50, y + 49, 32, 25); }
+    QRect soloRect(int y) const { return QRect(88, y + 49, 32, 25); }
+    QRect renameRect(int y) const { return QRect(126, y + 49, 32, 25); }
+    QRect cloneRect(int y) const { return QRect(164, y + 49, 32, 25); }
+    QRect removeRect(int y) const { return QRect(202, y + 49, 32, 25); }
+    QRect actionsRect(int y) const { return QRect(240, y + 49, 51, 25); }
     static void drawButton(QPainter &p, const QRect &r, const QString &label,
                            bool active, const QColor &accent) {
         p.setBrush(active ? accent : QColor("#3A404B"));
