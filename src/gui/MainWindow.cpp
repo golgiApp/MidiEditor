@@ -4514,6 +4514,35 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     fileMB->addAction(saveAsAction);
     _actionMap["save_as"] = saveAsAction;
 
+    QAction *exportArrangementAction = new QAction(tr("Export Arranged MIDI..."), this);
+    exportArrangementAction->setToolTip(tr("Render MIDI region positions into a separate standard MIDI file"));
+    connect(exportArrangementAction, &QAction::triggered, this, [this]() {
+        if (!file) return;
+        QString path = QFileDialog::getSaveFileName(
+            this, tr("Export Arranged MIDI"),
+            QFileInfo(file->path()).absolutePath() + QStringLiteral("/arranged.mid"),
+            tr("MIDI files (*.mid *.midi)"));
+        if (path.isEmpty()) return;
+        if (!path.endsWith(QStringLiteral(".mid"), Qt::CaseInsensitive) &&
+            !path.endsWith(QStringLiteral(".midi"), Qt::CaseInsensitive))
+            path += QStringLiteral(".mid");
+        if (QFileInfo(path).absoluteFilePath() == QFileInfo(file->path()).absoluteFilePath()) {
+            QMessageBox::warning(this, tr("Export Arranged MIDI"),
+                tr("Choose a different file name. Export cannot overwrite the editable source MIDI."));
+            return;
+        }
+        if (QFileInfo::exists(path)) {
+            if (QMessageBox::question(this, tr("Replace exported file?"),
+                tr("Replace the existing MIDI export?")) != QMessageBox::Yes) return;
+        }
+        if (!file->saveArrangedMidi(path))
+            QMessageBox::warning(this, tr("Export Arranged MIDI"),
+                                 tr("Could not export the arranged MIDI file."));
+        else statusBar()->showMessage(tr("Arranged MIDI exported"), 4000);
+    });
+    fileMB->addAction(exportArrangementAction);
+    _actionMap["export_arranged_midi"] = exportArrangementAction;
+
     fileMB->addSeparator();
 
 #ifdef FLUIDSYNTH_SUPPORT

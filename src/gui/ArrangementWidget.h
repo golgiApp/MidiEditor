@@ -41,6 +41,7 @@
 #include <limits>
 
 #include "../midi/MidiFile.h"
+#include "../midi/MidiPlayer.h"
 #include "../midi/MidiTrack.h"
 #include "../MidiEvent/NoteOnEvent.h"
 #include "../MidiEvent/OffEvent.h"
@@ -79,7 +80,8 @@ public:
         if (!_file) return 0;
         const int visibleMs = visibleTimeMs();
         // Include an extra second of visual room after the last MIDI event.
-        const auto songEnd = static_cast<long long>(_file->maxTime()) + 1000;
+        const auto songEnd = static_cast<long long>(std::max(
+            _file->maxTime(), _file->msOfTick(_file->arrangementEndTick()))) + 12000;
         return static_cast<int>(std::clamp(songEnd - visibleMs,
                      0LL, static_cast<long long>(std::numeric_limits<int>::max())));
     }
@@ -111,6 +113,9 @@ public:
         _hoverRow = -1;
         _dragging = false;
         _timelinePressed = false;
+        _regionPressed = false;
+        _regionDragging = false;
+        _moveRegionId = 0;
         _playheadMs = file ? file->msOfTick(file->cursorTick()) : -1;
         if (file) {
             file->setSoloTrack(nullptr);
@@ -208,6 +213,7 @@ public:
             if (!_regionsReady) loadRegionLayout();
             _regionsReady = true;
         }
+        _file->setRegionLayout(_regions);
         setMinimumHeight(std::max(130, rulerHeight + count * laneHeight));
         updateGeometry();
         refreshHorizontalRange();
@@ -392,6 +398,29 @@ protected:
             }
         }
 
+        if (_regionDragging && _moveRegionId > 0) {
+            const xiv::MidiRegion *moving = _regions.find(_moveRegionId);
+            if (moving) {
+                const int newStart = _moveProposedTick;
+                const int left = xForMs(_file->msOfTick(newStart));
+                const int right = xForMs(_file->msOfTick(newStart + moving->duration()));
+                const int top = rulerHeight + moving->trackIndex * laneHeight;
+                const bool valid = _regions.canMove(moving->id, newStart);
+                p.save();
+                p.setBrush(QColor(valid ? 47 : 170, valid ? 172 : 57,
+                                  valid ? 109 : 65, 62));
+                p.setPen(QPen(QColor(valid ? "#70E4A0" : "#ED6977"),
+                              2, Qt::DashLine));
+                p.drawRect(QRect(left, top + 7, std::max(1, right - left),
+                                 laneHeight - 14));
+                p.setPen(QColor("#FFFFFF"));
+                p.drawText(QRect(left+5, top+16, std::max(40, right-left-8), 20),
+                           Qt::AlignLeft | Qt::AlignVCenter,
+                           valid ? tr("Move region") : tr("Placement blocked"));
+                p.restore();
+            }
+        }
+
         // An accurate hover guide previews the exact split tick represented
         // by the cursor; this is not a snap-to-grid marker.
         if (_hoverTick >= 0 && _hoverRow >= 0 && _hoverRow < tracks.size()) {
@@ -556,6 +585,16 @@ protected:
             const xiv::MidiRegion *r = _regions.at(row, timelineTickAt(pos.x()));
             if (r && row >= 0 && row < _file->tracks()->size()) {
                 _selectedRegionId = r->id;
+                if (!MidiPlayer::isPlaying()) {
+                    _regionPressed = true;
+                    _regionDragging = false;
+                    _moveRegionId = r->id;
+                    _moveRow = row;
+                    _movePressedX = pos.x();
+                    _movePressedTick = timelineTickAt(pos.x());
+                    _moveOffsetTick = _movePressedTick - r->startTick;
+                    _moveProposedTick = r->startTick;
+                }
                 MidiTrack *track = _file->tracks()->at(row);
                 setSelectedTrack(track);
                 if (selectTrackRequested) selectTrackRequested(track);
@@ -590,6 +629,21 @@ protected:
             _hoverTick = hoverTick;
             _hoverRow = hoverRow;
             update();
+        }
+        if (_regionPressed && _moveRegionId > 0) {
+            if (!_regionDragging &&
+                std::abs(pos.x() - _movePressedX) >= QApplication::startDragDistance()) {
+                _regionDragging = true;
+                setCursor(Qt::SizeAllCursor);
+            }
+            if (_regionDragging) {
+                // Preserve the mouse grab offset so a dragged region does not
+                // jump its start under the mouse. Movement is exact MIDI ticks.
+                _moveProposedTick = std::max(0, timelineTickAt(pos.x()) - _moveOffsetTick);
+                update();
+            }
+            e->accept();
+            return;
         }
         if (_timelinePressed) {
             const int dx = pos.x() - _dragX;
@@ -639,6 +693,21 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && _regionPressed) {
+            const bool drag = _regionDragging;
+            const int id = _moveRegionId;
+            const int targetTick = _moveProposedTick;
+            const int releaseRow = (int(e->position().y()) - rulerHeight) / laneHeight;
+            _regionPressed = false;
+            _regionDragging = false;
+            _moveRegionId = 0;
+            unsetCursor();
+            // This first phase only moves regions within their original track.
+            if (drag && releaseRow == _moveRow) moveRegion(id, targetTick);
+            update();
+            e->accept();
+            return;
+        }
         if (e->button() == Qt::LeftButton && _timelinePressed) {
             const QPoint pos = e->position().toPoint();
             const bool wasDragging = _dragging ||
@@ -723,6 +792,8 @@ private:
                 !w->_regions.replaceValidated(old->_regionsAtCapture,
                                               w->_file->tracks()->size())) return;
             w->_selectedRegionId = old->_selectedAtCapture;
+            w->_file->setRegionLayout(w->_regions);
+            w->refreshHorizontalRange();
             // Undo and Redo also persist the restored layout, so a reopened
             // document matches the visible arrangement after the shortcut.
             if (!w->_file->path().isEmpty() && QFileInfo::exists(w->_file->path()))
@@ -773,6 +844,7 @@ private:
         const int newId = _regions.split(id, tick);
         if (!newId) { delete before; return; }
         _selectedRegionId = newId;
+        _file->setRegionLayout(_regions);
         _file->protocol()->startNewAction(tr("Split Region"));
         _file->protocol()->enterUndoStep(new ProtocolItem(before, &_regionHistory));
         _file->protocol()->endAction();
@@ -785,6 +857,24 @@ private:
         }
         update();
     }
+    void moveRegion(int id, int newStartTick) {
+        if (!_file || MidiPlayer::isPlaying()) return;
+        const auto *region = _regions.find(id);
+        if (!region || region->startTick == newStartTick ||
+            !_regions.canMove(id, newStartTick)) return;
+        ProtocolEntry *before = _regionHistory.copy();
+        if (!_regions.move(id, newStartTick)) { delete before; return; }
+        _file->setRegionLayout(_regions);
+        _file->protocol()->startNewAction(tr("Move Region"));
+        _file->protocol()->enterUndoStep(new ProtocolItem(before, &_regionHistory));
+        _file->protocol()->endAction();
+        if (!_file->path().isEmpty() && QFileInfo::exists(_file->path()) &&
+            !saveRegionLayout())
+            qWarning() << "XIV Midi Studio: moved region could not be persisted";
+        refreshHorizontalRange();
+        update();
+    }
+
     void loadRegionLayout() {
         if (!_file || _file->path().trimmed().isEmpty()) return;
         QFile input(_file->path() + QStringLiteral(".xivms-regions.json"));
@@ -827,6 +917,14 @@ private:
     double _scale = 0.065; // pixels per millisecond
     bool _dragging = false;
     bool _timelinePressed = false;
+    bool _regionPressed = false;
+    bool _regionDragging = false;
+    int _moveRegionId = 0;
+    int _moveRow = -1;
+    int _movePressedX = 0;
+    int _movePressedTick = 0;
+    int _moveOffsetTick = 0;
+    int _moveProposedTick = 0;
     int _dragX = 0;
     int _dragStartMs = 0;
     int _hoverTick = -1;

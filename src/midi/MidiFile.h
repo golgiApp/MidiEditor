@@ -26,6 +26,8 @@
 #include <QMultiMap>
 #include <QObject>
 #include <atomic>
+#include "../region/MidiRegionModel.h"
+#include <QList>
 
 // Forward declarations
 class MidiEvent;
@@ -112,6 +114,15 @@ public:
      * \return True if save was successful, false otherwise
      */
     bool saveForExport(QString path, int startTick = 0, int endTick = -1);
+
+    // The .mid Save command retains the original note events and edits are
+    // persisted in the .xivms-regions.json sidecar. This explicit export bakes
+    // region placements into a standard MIDI file without changing the source.
+    bool saveArrangedMidi(QString path);
+    void setRegionLayout(const xiv::MidiRegionModel &layout);
+    bool regionsChangeTiming() const;
+    int arrangementEndTick() const;
+
 
     /**
      * \brief Writes a delta time value to a byte array.
@@ -590,6 +601,11 @@ private:
 
     /** \brief Player data and state */
     QMultiMap<int, MidiEvent *> *playerMap;
+    xiv::MidiRegionModel _regionLayout;
+    QList<MidiEvent *> _renderedPlaybackEvents;
+    bool regionTrackHasChanged(int trackIndex) const;
+    void buildRenderedNoteEvents(QMultiMap<int, MidiEvent *> &destination,
+                                 QList<MidiEvent *> &owned) const;
     bool _saved;
 
     /** \brief Track management */
