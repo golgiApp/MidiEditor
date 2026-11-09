@@ -17,7 +17,6 @@
  */
 
 #include "TrackListWidget.h"
-
 #include "ColoredWidget.h"
 #include "Appearance.h"
 
@@ -27,7 +26,6 @@
 #include "../protocol/Protocol.h"
 
 #include <QAction>
-#include <QColorDialog>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QGridLayout>
@@ -341,7 +339,6 @@ void TrackListWidget::showTrackContextMenu(MidiTrack *track, const QPoint &globa
 
     // Core controls previously present only in the right-side Track list.
     QAction *renameAction = menu.addAction(tr("Rename Track..."));
-    QAction *colorAction = menu.addAction(tr("Change Track Color..."));
     QAction *removeAction = menu.addAction(tr("Remove Track"));
     QAction *visibilityAction = menu.addAction(track->hidden() ?
         tr("Show Track in Piano Roll") : tr("Hide Track in Piano Roll"));
@@ -415,14 +412,6 @@ void TrackListWidget::showTrackContextMenu(MidiTrack *track, const QPoint &globa
 
     if (selectedAction == renameAction) {
         emit trackRenameClicked(track->number());
-    } else if (selectedAction == colorAction) {
-        const int trackNumber = track->number();
-        const QColor color = QColorDialog::getColor(*track->color(), window(), tr("Track Color"));
-        if (color.isValid()) {
-            Appearance::setTrackColor(trackNumber, color);
-            Appearance::save();
-            emit trackColorChanged();
-        }
     } else if (selectedAction == removeAction) {
         emit trackRemoveClicked(track->number());
     } else if (selectedAction == visibilityAction) {

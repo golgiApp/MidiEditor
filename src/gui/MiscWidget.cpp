@@ -21,7 +21,7 @@
 
 #include <cmath>
 
-#define LEFT_BORDER_MATRIX_WIDGET 110
+// The Piano Roll gutter may expand to show the GM drum-note map.
 #define WIDTH 7
 
 MiscWidget::MiscWidget(MatrixWidget *mw, QWidget *parent)
@@ -111,7 +111,7 @@ void MiscWidget::paintEvent(QPaintEvent *event) {
     // divs
     typedef QPair<int, int> TMPPair;
     foreach(TMPPair p, matrixWidget->divs()) {
-        painter.drawLine(p.first - LEFT_BORDER_MATRIX_WIDGET, 0, p.first - LEFT_BORDER_MATRIX_WIDGET, height());
+        painter.drawLine(p.first - matrixWidget->pianoGutterWidth(), 0, p.first - matrixWidget->pianoGutterWidth(), height());
     }
 
     // draw contents
@@ -141,7 +141,7 @@ void MiscWidget::paintEvent(QPaintEvent *event) {
                     int h = (height() * velocity) / 128;
                     painter.setBrush(*c);
                     painter.setPen(Appearance::lightGrayColor());
-                    painter.drawRoundedRect(event->x() - LEFT_BORDER_MATRIX_WIDGET, height() - h, WIDTH, h, 1, 1);
+                    painter.drawRoundedRect(event->x() - matrixWidget->pianoGutterWidth(), height() - h, WIDTH, h, 1, 1);
                 }
             }
         }
@@ -172,7 +172,7 @@ void MiscWidget::paintEvent(QPaintEvent *event) {
                         }
                         painter.setBrush(Appearance::noteSelectionColor());
                         painter.setPen(Appearance::selectionBorderColor());
-                        painter.drawRoundedRect(event->x() - LEFT_BORDER_MATRIX_WIDGET, height() - h, WIDTH, h, 1, 1);
+                        painter.drawRoundedRect(event->x() - matrixWidget->pianoGutterWidth(), height() - h, WIDTH, h, 1, 1);
                     }
                 }
             }
@@ -293,7 +293,7 @@ void MiscWidget::mouseMoveEvent(QMouseEvent *event) {
 
                         if (velocity > 0) {
                             int h = (height() * velocity) / 128;
-                            if (!dragging && mouseInRect(event->x() - LEFT_BORDER_MATRIX_WIDGET, height() - h - 5, WIDTH, 10)) {
+                            if (!dragging && mouseInRect(event->x() - matrixWidget->pianoGutterWidth(), height() - h - 5, WIDTH, 10)) {
                                 above = true;
                                 break;
                             }
@@ -365,7 +365,7 @@ void MiscWidget::mousePressEvent(QMouseEvent *event) {
                 }
                 if (velocity > 0) {
                     int h = (height() * velocity) / 128;
-                    if (!dragging && mouseInRect(event->x() - LEFT_BORDER_MATRIX_WIDGET, height() - h - 5, WIDTH, 10)) {
+                    if (!dragging && mouseInRect(event->x() - matrixWidget->pianoGutterWidth(), height() - h - 5, WIDTH, 10)) {
                         clickHandlesSelected = true;
                         break;
                     }
@@ -393,7 +393,7 @@ void MiscWidget::mousePressEvent(QMouseEvent *event) {
                     }
                     if (velocity > 0) {
                         int h = (height() * velocity) / 128;
-                        if (!dragging && mouseInRect(event->x() - LEFT_BORDER_MATRIX_WIDGET, height() - h - 5, WIDTH, 10)) {
+                        if (!dragging && mouseInRect(event->x() - matrixWidget->pianoGutterWidth(), height() - h - 5, WIDTH, 10)) {
                             matrixWidget->midiFile()->protocol()->startNewAction(tr("Changed Selection"));
                             ProtocolEntry *toCopy = _dummyTool->copy();
                             EventTool::selectEvent(event, true);
@@ -918,11 +918,11 @@ void MiscWidget::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 int MiscWidget::tickOfXPos(int x) {
-    return matrixWidget->midiFile()->tick(matrixWidget->msOfXPos(x + LEFT_BORDER_MATRIX_WIDGET));
+    return matrixWidget->midiFile()->tick(matrixWidget->msOfXPos(x + matrixWidget->pianoGutterWidth()));
 }
 
 int MiscWidget::xPosOfTick(int tick) {
-    return matrixWidget->xPosOfMs(matrixWidget->midiFile()->msOfTick(tick)) - LEFT_BORDER_MATRIX_WIDGET;
+    return matrixWidget->xPosOfMs(matrixWidget->midiFile()->msOfTick(tick)) - matrixWidget->pianoGutterWidth();
 }
 
 int MiscWidget::value(double y) {
@@ -1101,7 +1101,7 @@ QPair<int, int> MiscWidget::processEvent(MidiEvent *e, bool *isOk) {
         case ControllEditor: {
             ControlChangeEvent *ctrl = dynamic_cast<ControlChangeEvent *>(e);
             if (ctrl && ctrl->control() == controller) {
-                int x = ctrl->x() - LEFT_BORDER_MATRIX_WIDGET;
+                int x = ctrl->x() - matrixWidget->pianoGutterWidth();
                 int y = ctrl->value();
                 pair.first = x;
                 pair.second = y;
@@ -1112,7 +1112,7 @@ QPair<int, int> MiscWidget::processEvent(MidiEvent *e, bool *isOk) {
         case PitchBendEditor: {
             PitchBendEvent *pitch = dynamic_cast<PitchBendEvent *>(e);
             if (pitch) {
-                int x = pitch->x() - LEFT_BORDER_MATRIX_WIDGET;
+                int x = pitch->x() - matrixWidget->pianoGutterWidth();
                 int y = pitch->value();
                 pair.first = x;
                 pair.second = y;
@@ -1123,7 +1123,7 @@ QPair<int, int> MiscWidget::processEvent(MidiEvent *e, bool *isOk) {
         case KeyPressureEditor: {
             KeyPressureEvent *pressure = dynamic_cast<KeyPressureEvent *>(e);
             if (pressure && pressure->note() == controller) {
-                int x = pressure->x() - LEFT_BORDER_MATRIX_WIDGET;
+                int x = pressure->x() - matrixWidget->pianoGutterWidth();
                 int y = pressure->value();
                 pair.first = x;
                 pair.second = y;
@@ -1134,7 +1134,7 @@ QPair<int, int> MiscWidget::processEvent(MidiEvent *e, bool *isOk) {
         case ChannelPressureEditor: {
             ChannelPressureEvent *pressure = dynamic_cast<ChannelPressureEvent *>(e);
             if (pressure) {
-                int x = pressure->x() - LEFT_BORDER_MATRIX_WIDGET;
+                int x = pressure->x() - matrixWidget->pianoGutterWidth();
                 int y = pressure->value();
                 pair.first = x;
                 pair.second = y;
@@ -1145,7 +1145,7 @@ QPair<int, int> MiscWidget::processEvent(MidiEvent *e, bool *isOk) {
         case TempoEditor: {
             TempoChangeEvent *tempo = dynamic_cast<TempoChangeEvent *>(e);
             if (tempo) {
-                int x = tempo->x() - LEFT_BORDER_MATRIX_WIDGET;
+                int x = tempo->x() - matrixWidget->pianoGutterWidth();
                 int y = tempo->beatsPerQuarter();
                 pair.first = x;
                 pair.second = y;

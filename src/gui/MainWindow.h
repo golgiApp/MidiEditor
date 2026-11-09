@@ -536,7 +536,6 @@ public slots:
     void removeTrack(int tracknumber);
 
     void setInstrumentForChannel(int i);
-    void chooseSoundFontForTrack(MidiTrack *track);
 
     void spreadSelection();
 
@@ -1039,6 +1038,8 @@ private:
     // v0.2.6: visible editor mode buttons and matching dark workspace action.
     QToolButton *_pianoRollShowSelectedButton = nullptr;
     QToolButton *_pianoRollShowAllButton = nullptr;
+    QToolButton *_pianoRollGMDrumsButton = nullptr;
+    QAction *_pianoRollGMDrumsAction = nullptr;
     QToolButton *_modernDarkWorkspaceButton = nullptr;
     QLabel *_pianoRollTrackLabel = nullptr;
     QAction *_modernDarkWorkspaceAction = nullptr;

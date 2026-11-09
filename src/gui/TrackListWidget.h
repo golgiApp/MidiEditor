@@ -122,7 +122,6 @@ public:
     void showTrackContextMenu(MidiTrack *track, const QPoint &globalPos);
 
 signals:
-    void trackColorChanged();
     /**
      * \brief Emitted when track rename is requested.
      * \param tracknumber The number of the track to rename

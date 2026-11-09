@@ -23,8 +23,6 @@
 
 #include <QObject>
 #include <QList>
-#include <QHash>
-#include <QVector>
 #include <QPair>
 #include <QRecursiveMutex>
 #include <QString>
@@ -211,24 +209,6 @@ public:
      */
     void addSoundFonts(const QStringList &paths);
 
-    // === FFXIV SoundFont track/channel preset browser ===
-    struct PresetInfo {
-        int soundFontId = -1; // Runtime ID only; never store this in MIDI.
-        QString soundFontPath;
-        QString name;
-        int bank = 0;
-        int program = 0;
-    };
-
-    // Enumerate the actual presets in every enabled, loaded SoundFont.
-    QVector<PresetInfo> availablePresets() const;
-
-    // Exact SoundFont selection for the built-in synth (channel-wide, not
-    // a portable MIDI-file property). This persists across program-change
-    // events during playback until cleared or replaced.
-    bool setChannelPreset(int channel, const PresetInfo &preset);
-    void clearChannelPresets();
-
     // === MIDI Message Routing ===
 
     /**
@@ -335,10 +315,6 @@ private:
 
     // SoundFont tracking: sfont_id → file path (in load order, last = highest priority)
     QList<QPair<int, QString>> _loadedFonts;
-
-    // Channel-level preview overrides. Store file path because FluidSynth IDs
-    // change whenever a SoundFont is unloaded/reloaded.
-    QHash<int, PresetInfo> _channelPresets;
 
     // SoundFont collection (persisted)
     QList<QPair<QString, bool>> _collection;

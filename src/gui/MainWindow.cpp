@@ -76,6 +76,8 @@
 #include "FFXIVFixerDialog.h"
 #include "../support/FFXIVChannelFixer.h"
 #include "../support/ChordVoiceFilter.h"
+#include "../support/CloneChannelAllocator.h"
+#include <array>
 
 #include <cstdint>
 #include <set>
@@ -130,7 +132,6 @@
 #include "../MidiEvent/TimeSignatureEvent.h"
 #include "../MidiEvent/PitchBendEvent.h"
 #include "../MidiEvent/ProgChangeEvent.h"
-#include "../MidiEvent/ControlChangeEvent.h"
 #include "../midi/Metronome.h"
 #include "../midi/MidiChannel.h"
 #include "../midi/MidiFile.h"
@@ -143,7 +144,6 @@
 
 #ifdef FLUIDSYNTH_SUPPORT
 #include "../midi/FluidSynthEngine.h"
-#include "SoundFontPresetPicker.h"
 #endif
 
 #include "../converter/MML/MmlImporter.h"
@@ -375,6 +375,14 @@ MainWindow::MainWindow(QString initFile)
     _pianoRollShowAllButton->setCheckable(true);
     _pianoRollShowAllButton->setToolTip(tr("Stack the notes from every visible instrument (Ctrl+Alt+G)"));
     pianoHeaderLayout->addWidget(_pianoRollShowAllButton);
+    // v0.2.11: display the GM percussion name next to each keyboard note.
+    // This is an optional visual reference, not an edit to MIDI events.
+    _pianoRollGMDrumsButton = new QToolButton(pianoHeader);
+    _pianoRollGMDrumsButton->setText(tr("GM Drum Labels"));
+    _pianoRollGMDrumsButton->setCheckable(true);
+    _pianoRollGMDrumsButton->setToolTip(tr("Show the GM1 percussion map for MIDI notes 35-81; non-GM SoundFonts may differ"));
+    pianoHeaderLayout->addWidget(_pianoRollGMDrumsButton);
+
     _modernDarkWorkspaceButton = new QToolButton(pianoHeader);
     _modernDarkWorkspaceButton->setText(tr("Dark UI"));
     _modernDarkWorkspaceButton->setCheckable(true);
@@ -412,7 +420,7 @@ MainWindow::MainWindow(QString initFile)
     velocityAreaLayout->setContentsMargins(0, 0, 0, 0);
     velocityAreaLayout->setHorizontalSpacing(6);
     _miscWidgetControl = new QWidget(velocityArea);
-    _miscWidgetControl->setFixedWidth(110 - velocityAreaLayout->horizontalSpacing());
+    _miscWidgetControl->setFixedWidth(mw_matrixWidget->pianoGutterWidth() - velocityAreaLayout->horizontalSpacing());
 
     velocityAreaLayout->addWidget(_miscWidgetControl, 0, 0, 1, 1);
     // there is a Scrollbar on the right side of the velocityWidget doing
@@ -453,7 +461,7 @@ MainWindow::MainWindow(QString initFile)
     hori->setPageStep(5000);
     
     QHBoxLayout *scrollBarLayout = new QHBoxLayout(scrollBarArea);
-    scrollBarLayout->setContentsMargins(110, 0, 0, 0); // Align with matrix widget
+    scrollBarLayout->setContentsMargins(mw_matrixWidget->pianoGutterWidth(), 0, 0, 0); // Align to the configurable Piano Roll gutter
     scrollBarLayout->addWidget(hori);
     scrollBarArea->setLayout(scrollBarLayout);
 
@@ -567,14 +575,14 @@ MainWindow::MainWindow(QString initFile)
     arrangementLayout->setContentsMargins(0, 0, 0, 0);
     arrangementLayout->setSpacing(0);
     QToolBar *arrangementTB = new QToolBar(arrangementPane);
-    arrangementTB->setIconSize(QSize(26, 26));
+    arrangementTB->setIconSize(QSize(19, 19));
     arrangementTB->setMovable(false);
-    arrangementTB->setMinimumHeight(48);
+    arrangementTB->setFixedHeight(36);
     arrangementTB->setStyleSheet(QStringLiteral(
         "QToolBar { background:#27303C; border-bottom:1px solid #455568;"
         "  padding:3px 9px; spacing:5px; }"
         "QToolBar QToolButton { color:#EDF3FA; background:#364557;"
-        "  border:1px solid #607389; border-radius:5px; min-width:26px; min-height:26px; padding:4px; }"
+        "  border:1px solid #607389; border-radius:5px; min-width:23px; padding:3px; }"
         "QToolBar QToolButton:hover { background:#46627F; }"
         "QToolBar QToolButton:pressed { background:#185C91; }"
         "QToolBar QToolButton:disabled { color:#808D9F; background:#2B3541; }"));
@@ -599,9 +607,6 @@ MainWindow::MainWindow(QString initFile)
     };
     _arrangementWidget->trackMenuRequested = [this](MidiTrack *track, const QPoint &globalPos) {
         if (_trackWidget) _trackWidget->showTrackContextMenu(track, globalPos);
-    };
-    _arrangementWidget->soundFontPresetRequested = [this](MidiTrack *track) {
-        chooseSoundFontForTrack(track);
     };
     _arrangementWidget->renameTrackRequested = [this](MidiTrack *track) {
         if (track && file && file->tracks()->contains(track)) renameTrack(track->number());
@@ -729,7 +734,6 @@ MainWindow::MainWindow(QString initFile)
     arrangementTB->addAction(_fixXIVChannelsTracksAction);
 
     _trackWidget = new TrackListWidget(tracksWidget);
-    connect(_trackWidget, &TrackListWidget::trackColorChanged, this, &MainWindow::updateAll);
     connect(_trackWidget, SIGNAL(trackRenameClicked(int)), this, SLOT(renameTrack(int)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(trackRemoveClicked(int)), this, SLOT(removeTrack(int)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(cloneTrackRequested(MidiTrack*)), this, SLOT(cloneTrack(MidiTrack*)), Qt::QueuedConnection);
@@ -862,8 +866,6 @@ MainWindow::MainWindow(QString initFile)
     }
     connect(_chooseEditChannel, SIGNAL(activated(int)), this, SLOT(editChannel(int)));
     arrangementTB->addWidget(new QLabel(tr("New notes:"), arrangementTB));
-    _chooseEditChannel->setMinimumHeight(30);
-    _chooseEditChannel->setToolTip(tr("Choose the MIDI channel for newly added notes"));
     _chooseEditChannel->setMinimumWidth(185);
     _chooseEditChannel->setMaximumWidth(240);
     arrangementTB->addWidget(_chooseEditChannel);
@@ -1056,10 +1058,6 @@ void MainWindow::scrollPositionsChanged(int startMs, int maxMs, int startLine,
 void MainWindow::setFile(MidiFile *newFile) {
     // Store reference to old file for cleanup
     MidiFile *oldFile = this->file;
-
-#ifdef FLUIDSYNTH_SUPPORT
-    FluidSynthEngine::instance()->clearChannelPresets();
-#endif
 
     EventTool::clearSelection();
     Selection::setFile(newFile);
@@ -3601,54 +3599,135 @@ void MainWindow::splitChannelsToTracks(MidiTrack *sourceTrack) {
 void MainWindow::cloneTrack(MidiTrack *source) {
     if (!file || !source) return;
 
-    file->protocol()->startNewAction(tr("Clone Track"));
+    // A MIDI track and a MIDI channel are independent concepts. Cloning
+    // into the same channel causes both tracks to share instrument/CC state.
+    // Reserve ALL channels in use by any event or assigned to any track,
+    // including empty tracks, to avoid silent channel collisions.
+    std::array<bool, 16> occupied = {};
+    for (MidiTrack *track : *file->tracks()) {
+        const int assigned = track->assignedChannel();
+        if (assigned >= 0 && assigned < 16) occupied[assigned] = true;
+    }
 
-    // Create new track
-    file->addTrack();
-    MidiTrack *newTrack = file->tracks()->last();
-    newTrack->setName(source->name() + tr(" (copy)"));
-    newTrack->assignChannel(source->assignedChannel());
-
-    // Move to right below the original track
-    int originalIndex = file->tracks()->indexOf(source);
-    if (originalIndex >= 0) {
-        file->tracks()->removeOne(newTrack);
-        file->tracks()->insert(originalIndex + 1, newTrack);
-        // Renumber tracks
-        for (int i = 0; i < file->tracks()->size(); ++i) {
-            file->tracks()->at(i)->setNumber(i);
+    int sourceEventChannel = -1;
+    bool sourceIsMultichannel = false;
+    for (int ch = 0; ch < 16; ++ch) {
+        QMultiMap<int, MidiEvent *> *emap = file->channel(ch)->eventMap();
+        if (!emap) continue;
+        if (!emap->isEmpty()) occupied[ch] = true;
+        for (auto it = emap->cbegin(); it != emap->cend(); ++it) {
+            if (it.value()->track() != source) continue;
+            if (sourceEventChannel == -1) sourceEventChannel = ch;
+            else if (sourceEventChannel != ch) sourceIsMultichannel = true;
         }
     }
 
-    // Copy events
-    for (int ch = 0; ch < 19; ++ch) {
+    // Collapsing multiple source channels into one would lose distinctions
+    // between the source instruments and controllers.
+    if (sourceIsMultichannel) {
+        QMessageBox::warning(this, tr("Cannot Clone Track to One Channel"),
+            tr("This track contains MIDI events on multiple channels. "
+               "Split its channels into separate tracks before cloning "
+               "to preserve instruments and controller data."));
+        return;
+    }
+
+    const int sourceChannel = sourceEventChannel >= 0
+        ? sourceEventChannel : source->assignedChannel();
+    // General MIDI channel 10 is special: reassigning drums would change
+    // their sound, but sharing channel 10 would violate clone isolation.
+    if (sourceChannel == 9 || source->assignedChannel() == 9) {
+        QMessageBox::warning(this, tr("Cannot Isolate Drum Track"),
+            tr("MIDI channel 10 is reserved for percussion. Cloning the "
+               "drums onto a melodic channel would change their sounds. "
+               "The original drum track was not modified."));
+        return;
+    }
+
+    const int targetChannel = FFXIVClone::findUnusedMelodicChannel(
+        occupied, sourceChannel);
+    if (targetChannel < 0) {
+        QMessageBox::warning(this, tr("No Unused MIDI Channels"),
+            tr("All 15 melodic MIDI channels are assigned or contain "
+               "events. Free a channel before cloning this track. "
+               "Nothing was changed."));
+        return;
+    }
+
+    file->protocol()->startNewAction(tr("Clone Track (Independent Channel)"));
+
+    // Create the new track on its own MIDI channel.
+    file->addTrack();
+    MidiTrack *newTrack = file->tracks()->last();
+    newTrack->setName(source->name() + tr(" (copy)"));
+    newTrack->assignChannel(targetChannel);
+
+    // Keep the clone directly underneath the source in the track list.
+    const int originalIndex = file->tracks()->indexOf(source);
+    if (originalIndex >= 0) {
+        file->tracks()->removeOne(newTrack);
+        file->tracks()->insert(originalIndex + 1, newTrack);
+        for (int i = 0; i < file->tracks()->size(); ++i)
+            file->tracks()->at(i)->setNumber(i);
+    }
+
+    // Snapshot before insertion. Note-on/off pairs must be created together
+    // on targetChannel; copy channel-specific controllers/program changes
+    // there as well so the instruments no longer share playback state.
+    bool copiedOwnProgram = false;
+    for (int ch = 0; ch < 16; ++ch) {
+        for (MidiEvent *ev : *file->channel(ch)->eventMap()) {
+            if (ev->track() == source && dynamic_cast<ProgChangeEvent *>(ev)) {
+                copiedOwnProgram = true;
+                break;
+            }
+        }
+    }
+    for (int ch = 0; ch < 17; ++ch) { // exclude global tempo/time signature channels
+
         QMultiMap<int, MidiEvent *> *emap = file->channel(ch)->eventMap();
-        // Use uniqueKeys to iterate safely
-        QList<int> ticks = emap->uniqueKeys();
-        foreach(int tick, ticks) {
-            QList<MidiEvent *> events = emap->values(tick);
-            foreach(MidiEvent *ev, events) {
-                if (ev->track() == source) {
-                    if (NoteOnEvent *on = dynamic_cast<NoteOnEvent *>(ev)) {
-                        // For notes, use insertNote to handle OffEvent correctly
-                        if (on->offEvent()) {
-                            file->channel(ch)->insertNote(on->note(), on->midiTime(), on->offEvent()->midiTime(), on->velocity(), newTrack);
-                        }
-                    } else if (!dynamic_cast<OffEvent *>(ev)) {
-                        // For other events (except OffEvents which are handled by insertNote), copy and insert
-                        ProtocolEntry *pe = ev->copy();
-                        MidiEvent *copy = dynamic_cast<MidiEvent *>(pe);
-                        if (copy) {
-                            copy->setTrack(newTrack, false);
-                            file->channel(ch)->insertEvent(copy, tick, false);
-                        }
+        const QList<int> ticks = emap->uniqueKeys();
+        for (int tick : ticks) {
+            const QList<MidiEvent *> events = emap->values(tick);
+            for (MidiEvent *ev : events) {
+                if (ev->track() != source) continue;
+                if (ev == source->nameEvent()) continue; // already named
+
+                if (NoteOnEvent *on = dynamic_cast<NoteOnEvent *>(ev)) {
+                    if (on->offEvent()) {
+                        file->channel(targetChannel)->insertNote(
+                            on->note(), on->midiTime(),
+                            on->offEvent()->midiTime(), on->velocity(), newTrack);
+                    }
+                } else if (!dynamic_cast<OffEvent *>(ev)) {
+                    ProtocolEntry *pe = ev->copy();
+                    MidiEvent *copy = dynamic_cast<MidiEvent *>(pe);
+                    if (copy) {
+                        copy->setTrack(newTrack, false);
+                        // MIDI channel messages are moved to the new
+                        // channel. Global/meta events retain their type.
+                        const int outputChannel = ch < 16 ? targetChannel : ch;
+                        if (ch < 16) copy->setChannel(targetChannel, false);
+                        file->channel(outputChannel)->insertEvent(copy, tick, false);
+                    } else {
+                        delete pe;
                     }
                 }
             }
         }
     }
 
+    // When the source inherited its program from another track using the
+    // same channel, preserve the initial instrument on the new channel too.
+    if (!copiedOwnProgram) {
+        const int initialProgram = file->channel(sourceChannel)->progAtTick(0);
+        file->channel(targetChannel)->insertEvent(
+            new ProgChangeEvent(targetChannel, initialProgram, newTrack), 0, false);
+    }
+
     file->protocol()->endAction();
+    statusBar()->showMessage(tr("Cloned '%1' to independent MIDI channel %2")
+        .arg(source->name()).arg(targetChannel + 1), 5000);
     updateAll();
 }
 
@@ -4143,126 +4222,6 @@ void MainWindow::editTrackAndChannel(MidiTrack *track) {
     }
 
     editChannel(focusCh, false);
-}
-
-void MainWindow::chooseSoundFontForTrack(MidiTrack *track) {
-#ifdef FLUIDSYNTH_SUPPORT
-    if (!file || !track || !file->tracks()->contains(track)) return;
-    if (!MidiOutput::isFluidSynthOutput()) {
-        QMessageBox::information(this, tr("SoundFont Presets"),
-            tr("Choose FluidSynth (Built-in Synthesizer) as your MIDI output first. "
-               "SoundFont presets are available only through FluidSynth."));
-        return;
-    }
-    auto *engine = FluidSynthEngine::instance();
-    const auto presets = engine->availablePresets();
-    if (presets.isEmpty()) {
-        QMessageBox::information(this, tr("No SoundFont Presets"),
-            tr("No presets are loaded yet. Enable a SoundFont in MIDI settings, "
-               "allow it to finish loading, then open the SoundFont browser again."));
-        return;
-    }
-
-    SoundFontPresetPicker dialog(track->name(), presets, this);
-    if (dialog.exec() != QDialog::Accepted) return;
-    const auto selected = dialog.selectedPreset();
-    if (selected.soundFontPath.isEmpty() || !file || !file->tracks()->contains(track)) return;
-
-    // MIDI program, bank and SoundFont selections are channel properties.
-    // Derive the channel from notes rather than trusting an outdated default.
-    QSet<int> trackChannels;
-    QSet<MidiTrack *> sharedTracks;
-    for (int ch = 0; ch < 16; ++ch) {
-        const auto *events = file->channelEvents(ch);
-        for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
-            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
-            if (!note || note->velocity() <= 0) continue;
-            if (note->track() == track) trackChannels.insert(ch);
-        }
-    }
-    int channel = -1;
-    if (!trackChannels.isEmpty())
-        channel = *std::min_element(trackChannels.cbegin(), trackChannels.cend());
-    else channel = track->assignedChannel();
-    if (channel < 0 || channel >= 16) {
-        QMessageBox::warning(this, tr("SoundFont Presets"),
-            tr("Cannot determine a valid MIDI channel for this track."));
-        return;
-    }
-    if (trackChannels.size() > 1) {
-        QMessageBox::information(this, tr("Track Uses Multiple MIDI Channels"),
-            tr("This track uses %1 channels. Only channel %2 will be changed. "
-               "Split the track by channel to assign independent sounds.")
-               .arg(trackChannels.size()).arg(channel + 1));
-    }
-    const auto *events = file->channelEvents(channel);
-    for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
-        auto *note = dynamic_cast<NoteOnEvent *>(it.value());
-        if (note && note->velocity() > 0 && note->track() && note->track() != track)
-            sharedTracks.insert(note->track());
-    }
-    if (!sharedTracks.isEmpty()) {
-        const auto answer = QMessageBox::warning(this, tr("Shared MIDI Channel"),
-            tr("This track shares MIDI channel %1 with %2 other track(s). "
-               "MIDI instruments are channel-based, so the selected preset "
-               "will also affect those tracks. Continue?")
-               .arg(channel + 1).arg(sharedTracks.size()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (answer != QMessageBox::Yes) return;
-    }
-    if (!engine->setChannelPreset(channel, selected)) {
-        QMessageBox::warning(this, tr("SoundFont Not Available"),
-            tr("The SoundFont is no longer loaded. Check your SoundFont settings and retry."));
-        return;
-    }
-
-    // The preset name becomes the actual MIDI track name (not merely the
-    // temporary label in the arrangement header). MidiTrack::setName writes
-    // the track-name meta event, so saving the .mid retains the new name.
-    // Only this chosen track is renamed, even if its channel is shared.
-    const QString presetName = selected.name.trimmed();
-    const bool renameTrackToPreset = !presetName.isEmpty() && track->name() != presetName;
-    const bool writeMidiAssignment = dialog.writeMidiAssignment();
-
-    if (renameTrackToPreset || writeMidiAssignment) {
-        // Changing MIDI events while playing is unsafe. A preview-only
-        // selection still renames the track, but never rewrites bank/program.
-        if (writeMidiAssignment && MidiPlayer::isPlaying()) stop();
-
-        // Group the rename and optional MIDI instrument assignment into one
-        // reversible Undo/Redo operation.
-        file->protocol()->startNewAction(tr("Assign SoundFont Preset: %1").arg(selected.name));
-        if (writeMidiAssignment) {
-            // MIDI bank and program changes are portable; the SoundFont path
-            // itself cannot be embedded in a Standard MIDI File.
-            MidiChannel *midiChannel = file->channel(channel);
-            QList<MidiEvent *> superseded;
-            for (auto *ev : midiChannel->eventMap()->values()) {
-                if (ev->track() != track) continue;
-                if (dynamic_cast<ProgChangeEvent *>(ev)) {
-                    superseded.append(ev);
-                } else if (auto *cc = dynamic_cast<ControlChangeEvent *>(ev)) {
-                    if (cc->control() == 0 || cc->control() == 32) superseded.append(ev);
-                }
-            }
-            for (auto *ev : superseded) midiChannel->removeEvent(ev);
-            // Bank Select MSB, Bank Select LSB, Program Change at tick zero.
-            const int bank = std::clamp(selected.bank, 0, 16383);
-            midiChannel->insertEvent(new ControlChangeEvent(channel, 0, (bank >> 7) & 0x7F, track), 0);
-            midiChannel->insertEvent(new ControlChangeEvent(channel, 32, bank & 0x7F, track), 0);
-            midiChannel->insertEvent(new ProgChangeEvent(channel, selected.program, track), 0);
-        }
-        if (renameTrackToPreset) track->setName(presetName);
-        file->protocol()->endAction();
-        if (renameTrackToPreset) updateTrackMenu();
-    }
-    statusBar()->showMessage(tr("SoundFont preview: %1 (bank %2, program %3) on MIDI channel %4")
-        .arg(selected.name).arg(selected.bank).arg(selected.program).arg(channel + 1), 8000);
-#else
-    Q_UNUSED(track);
-    QMessageBox::information(this, tr("SoundFont Presets"),
-        tr("This build does not include FluidSynth."));
-#endif
 }
 
 void MainWindow::setInstrumentForChannel(int channel) {
@@ -5415,6 +5374,31 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     });
     _pianoRollShowSelectedButton->setChecked(!_showAllTracksInPianoRoll);
     _pianoRollShowAllButton->setChecked(_showAllTracksInPianoRoll);
+
+    _pianoRollGMDrumsAction = new QAction(tr("Show GM Drum Labels in Piano Roll"), this);
+    _pianoRollGMDrumsAction->setCheckable(true);
+    _pianoRollGMDrumsAction->setChecked(_settings->value("ffxiv/gm_drum_labels", false).toBool());
+    _pianoRollGMDrumsAction->setToolTip(tr("Show General MIDI drum names by pitch; custom drum maps may differ"));
+    connect(_pianoRollGMDrumsAction, &QAction::toggled, this, [this](bool show) {
+        _settings->setValue("ffxiv/gm_drum_labels", show);
+        if (mw_matrixWidget) mw_matrixWidget->setGMDrumLabelsVisible(show);
+        // The velocity editor and horizontal scrollbar must stay synchronized
+        // with the Piano Roll time axis when the keyboard gutter is resized.
+        const int gutter = mw_matrixWidget ? mw_matrixWidget->pianoGutterWidth() : (show ? 242 : 110);
+        if (_miscWidgetControl && _miscWidgetControl->parentWidget()) {
+            QGridLayout *grid = qobject_cast<QGridLayout *>(_miscWidgetControl->parentWidget()->layout());
+            _miscWidgetControl->setFixedWidth(gutter - (grid ? grid->horizontalSpacing() : 6));
+        }
+        if (hori && hori->parentWidget() && hori->parentWidget()->layout()) {
+            hori->parentWidget()->layout()->setContentsMargins(gutter, 0, 0, 0);
+        }
+        if (_miscWidgetContainer) _miscWidgetContainer->update();
+        if (_pianoRollGMDrumsButton) _pianoRollGMDrumsButton->setChecked(show);
+    });
+    viewMB->addAction(_pianoRollGMDrumsAction);
+    connect(_pianoRollGMDrumsButton, &QToolButton::clicked,
+            _pianoRollGMDrumsAction, &QAction::setChecked);
+    _pianoRollGMDrumsButton->setChecked(_pianoRollGMDrumsAction->isChecked());
 
     _modernDarkWorkspaceAction = new QAction(tr("Modern Dark Workspace"), this);
     _modernDarkWorkspaceAction->setCheckable(true);

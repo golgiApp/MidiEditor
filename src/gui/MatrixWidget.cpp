@@ -43,6 +43,7 @@
 #include "../tool/MeasureTool.h"
 #include "../tool/EventTool.h"
 #include "MainWindow.h"
+#include "../support/GMDrumMap.h"
 #include <algorithm>
 #include <set>
 #include "../gui/Appearance.h"
@@ -85,7 +86,8 @@ MatrixWidget::MatrixWidget(QSettings *settings, QWidget *parent)
     scaleX = 1;
     pianoEvent = new NoteOnEvent(0, 100, 0, 0);
     scaleY = 1;
-    lineNameWidth = 110;
+    _showGMDrumLabels = _settings->value("ffxiv/gm_drum_labels", false).toBool();
+    lineNameWidth = _showGMDrumLabels ? 242 : 110;
     timeHeight = 50;
     currentTempoEvents = new QList<MidiEvent *>;
     currentTimeSignatureEvents = new QList<TimeSignatureEvent *>;
@@ -125,6 +127,14 @@ MatrixWidget::MatrixWidget(QSettings *settings, QWidget *parent)
     _currentOctaveShift = 0;
     _isOctaveUpPressed = false;
     _isOctaveDownPressed = false;
+}
+
+void MatrixWidget::setGMDrumLabelsVisible(bool show) {
+    if (_showGMDrumLabels == show) return;
+    _showGMDrumLabels = show;
+    lineNameWidth = show ? 242 : 110;
+    if (file) calcSizes();
+    else { registerRelayout(); update(); }
 }
 
 void MatrixWidget::setScreenLocked(bool b) {
@@ -467,6 +477,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                                 height());
 
         pixpainter->setPen(_cachedDarkGrayColor);
+        pixpainter->setBrush(_cachedPianoWhiteKeyColor);
         
         // Box for measures/time text: Top, Left, and Right lines only (no bottom border for a cleaner look)
         pixpainter->drawLine(lineNameWidth, 2, width() - 1, 2);
@@ -474,13 +485,13 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         pixpainter->drawLine(width() - 1, 2, width() - 1, rulerHeight);
         
         // Background for the ruler
-        pixpainter->fillRect(lineNameWidth + 1, 3, width() - lineNameWidth - 2, rulerHeight - 4, _cachedPianoRulerColor);
+        pixpainter->fillRect(lineNameWidth + 1, 3, width() - lineNameWidth - 2, rulerHeight - 4, _cachedPianoWhiteKeyColor);
         
         pixpainter->setPen(_cachedForegroundColor);
 
         if (_markerRowHeight > 0) {
             // Background for markers - match the ruler background
-            pixpainter->fillRect(lineNameWidth, rulerHeight, width() - lineNameWidth, _markerRowHeight, _cachedPianoRulerColor);
+            pixpainter->fillRect(lineNameWidth, rulerHeight, width() - lineNameWidth, _markerRowHeight, _cachedPianoWhiteKeyColor);
             
             // Minimal top separator from ruler
             pixpainter->setPen(_cachedBorderColor);
@@ -703,8 +714,10 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
     for (int i = startLineY; i <= endLineY; i++) {
         int startLine = yPosOfLine(i);
         if (i >= 0 && i <= 127) {
+            // In GM label mode, keep the physical piano keys narrow and reserve
+            // the rest of the left gutter for readable note/instrument names.
             paintPianoKey(painter, 127 - i, 0, startLine,
-                          lineNameWidth, lineHeight());
+                          _showGMDrumLabels ? 82 : lineNameWidth, lineHeight());
         } else {
             QString text = "";
             switch (i) {
@@ -767,6 +780,39 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                 painter->drawText(lineNameWidth - 15 - textlength, startLine + lineHeight(), text);
             }
         }
+    }
+
+    // Optional GM drum map. Each row is positioned by its actual MIDI pitch
+    // rather than by an octave label (octave numbering varies across DAWs).
+    if (_showGMDrumLabels) {
+        painter->save();
+        const int labelStart = 75;
+        const int labelWidth = lineNameWidth - labelStart - 10;
+        QFont drumFont = Appearance::improveFont(painter->font());
+        drumFont.setPixelSize(11);
+        painter->setFont(drumFont);
+        painter->setClipRect(labelStart, timeHeight, labelWidth, height() - timeHeight);
+        for (int line = startLineY; line <= endLineY; ++line) {
+            const int note = 127 - line;
+            const char *name = GMDrumMap::nameForNote(note);
+            if (!name) continue;
+            const int top = yPosOfLine(line);
+            const int bottom = yPosOfLine(line + 1);
+            const int rowHeight = bottom - top;
+            if (rowHeight <= 0 || bottom < timeHeight || top > height()) continue;
+            painter->fillRect(labelStart, top, labelWidth, rowHeight,
+                              (note % 2 == 0) ? QColor(38, 49, 63) : QColor(45, 57, 72));
+            painter->setPen(QColor(68, 82, 99));
+            painter->drawLine(labelStart, bottom - 1, labelStart + labelWidth, bottom - 1);
+            if (rowHeight >= 11) {
+                painter->setPen(QColor(235, 241, 249));
+                const QString text = QString::number(note) + QStringLiteral("  ") + QString::fromLatin1(name);
+                const QString clipped = QFontMetrics(drumFont).elidedText(text, Qt::ElideRight, labelWidth - 9);
+                painter->drawText(QRect(labelStart + 5, top, labelWidth - 7, rowHeight),
+                                  Qt::AlignVCenter | Qt::AlignLeft, clipped);
+            }
+        }
+        painter->restore();
     }
 
     // Second pass: Draw keybind labels on top of all piano keys
@@ -1213,7 +1259,7 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
         painter->drawPolygon(keyPolygon, Qt::OddEvenFill);
 
         if (name != "") {
-            painter->setPen(QColor(65, 65, 65));
+            painter->setPen(Qt::gray); // Original color for both modes
             QFontMetrics fm(painter->font());
             int textlength = fm.horizontalAdvance(name);
 
@@ -1351,6 +1397,15 @@ void MatrixWidget::mouseMoveEvent(QMouseEvent *event) {
     int mouseX = qRound(event->position().x());
     int mouseY = qRound(event->position().y());
     int currentMs = msOfXPos(mouseX);
+    if (_showGMDrumLabels && mouseInRect(PianoArea) && mouseX >= 75 && mouseX < lineNameWidth) {
+        const int note = 127 - lineAtY(mouseY);
+        const char *name = GMDrumMap::nameForNote(note);
+        setToolTip(name ? tr("MIDI note %1: %2 (GM percussion)").arg(note).arg(QString::fromLatin1(name))
+                        : tr("MIDI note %1: no GM1 percussion assignment").arg(note));
+    } else if (_showGMDrumLabels && !toolTip().isEmpty()) {
+        setToolTip(QString());
+    }
+
     
     // Determine the note under the cursor (or aligned with it in the matrix)
     int currentPianoKey = -1;
@@ -1383,7 +1438,7 @@ void MatrixWidget::mouseMoveEvent(QMouseEvent *event) {
                 while (yPosOfLine(currentLine) > mouseY) currentLine--;
             }
             int note = 127 - currentLine;
-            if ((1 << (note % 12)) & 0x54A) {
+            if ((!_showGMDrumLabels || mouseX < 72) && ((1 << (note % 12)) & 0x54A)) {
                 // Split the black key row horizontally. Top half belongs to note + 1, bottom half to note - 1.
                 int rowY = yPosOfLine(currentLine);
                 int nextY = yPosOfLine(currentLine + 1);
@@ -1655,7 +1710,7 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
                 while (yPosOfLine(currentLine) > mouseY) currentLine--;
             }
             int note = 127 - currentLine;
-            if ((1 << (note % 12)) & 0x54A) {
+            if ((!_showGMDrumLabels || mouseX < 72) && ((1 << (note % 12)) & 0x54A)) {
                 int rowY = yPosOfLine(currentLine);
                 int nextY = yPosOfLine(currentLine + 1);
                 if (mouseY < rowY + (nextY - rowY) / 2.0) {
@@ -1699,7 +1754,7 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
                 while (yPosOfLine(currentLine) > mouseY) currentLine--;
             }
             int note = 127 - currentLine;
-            if ((1 << (note % 12)) & 0x54A) {
+            if ((!_showGMDrumLabels || mouseX < 72) && ((1 << (note % 12)) & 0x54A)) {
                 int rowY = yPosOfLine(currentLine);
                 int nextY = yPosOfLine(currentLine + 1);
                 if (mouseY < rowY + (nextY - rowY) / 2.0) {
@@ -1904,7 +1959,6 @@ void MatrixWidget::updateCachedAppearanceColors() {
     _cachedPianoBlackKeySelectedColor = Appearance::pianoBlackKeySelectedColor();
     _cachedPianoBlackKeyActiveColor = Appearance::pianoBlackKeyActiveColor();
     _cachedPianoWhiteKeyColor = Appearance::pianoWhiteKeyColor();
-    _cachedPianoRulerColor = Appearance::pianoRulerColor();
     _cachedPianoWhiteKeyHoverColor = Appearance::pianoWhiteKeyHoverColor();
     _cachedPianoWhiteKeySelectedColor = Appearance::pianoWhiteKeySelectedColor();
     _cachedPianoWhiteKeyActiveColor = Appearance::pianoWhiteKeyActiveColor();

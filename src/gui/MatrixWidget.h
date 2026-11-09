@@ -114,6 +114,10 @@ public:
     }
     MidiTrack *focusedTrack() const { return _focusedTrack; }
 
+    void setGMDrumLabelsVisible(bool show);
+    bool gmDrumLabelsVisible() const { return _showGMDrumLabels; }
+    int pianoGutterWidth() const { return lineNameWidth; }
+
     // === Event Access ===
 
     /**
@@ -663,7 +667,6 @@ private:
 
     // Additional theme colors
     QColor _cachedPianoWhiteKeyColor;
-    QColor _cachedPianoRulerColor;
     QColor _cachedPianoWhiteKeyHoverColor;
     QColor _cachedPianoWhiteKeySelectedColor;
     QColor _cachedPianoWhiteKeyActiveColor;
@@ -718,6 +721,7 @@ private:
     /** \brief Currently loaded MIDI file */
     MidiFile *file;
     MidiTrack *_focusedTrack = nullptr;
+    bool _showGMDrumLabels = false;
 
     // === Display Areas ===
 
