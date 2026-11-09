@@ -545,7 +545,7 @@ bool EventTool::pasteFromSharedClipboard() {
     const int delta = destination->cursorTick() - firstTick;
 
     auto destinationChannel = [](MidiEvent *event) {
-        const int ch = destinationChannel(event);
+        const int ch = event->channel();
         return ch >= 0 && ch < 16 ? ch : 0;
     };
     std::set<int> affectedChannels;
