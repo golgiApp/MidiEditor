@@ -379,7 +379,7 @@ MainWindow::MainWindow(QString initFile)
     // v0.2.11: display the GM percussion name next to each keyboard note.
     // This is an optional visual reference, not an edit to MIDI events.
     _pianoRollGMDrumsButton = new QToolButton(pianoHeader);
-    _pianoRollGMDrumsButton->setText(tr("GM Drum Labels"));
+    _pianoRollGMDrumsButton->setText(tr("GM Drum Map"));
     _pianoRollGMDrumsButton->setCheckable(true);
     _pianoRollGMDrumsButton->setToolTip(tr("Show the GM1 percussion map for MIDI notes 35-81; non-GM SoundFonts may differ"));
     pianoHeaderLayout->addWidget(_pianoRollGMDrumsButton);
@@ -5440,7 +5440,7 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     _pianoRollShowSelectedButton->setChecked(!_showAllTracksInPianoRoll);
     _pianoRollShowAllButton->setChecked(_showAllTracksInPianoRoll);
 
-    _pianoRollGMDrumsAction = new QAction(tr("Show GM Drum Labels in Piano Roll"), this);
+    _pianoRollGMDrumsAction = new QAction(tr("Show GM Drum Map in Piano Roll"), this);
     _pianoRollGMDrumsAction->setCheckable(true);
     _pianoRollGMDrumsAction->setChecked(_settings->value("ffxiv/gm_drum_labels", false).toBool());
     _pianoRollGMDrumsAction->setToolTip(tr("Show General MIDI drum names by pitch; custom drum maps may differ"));

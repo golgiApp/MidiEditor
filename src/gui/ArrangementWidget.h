@@ -245,21 +245,39 @@ protected:
             const int x0 = std::max(headerWidth + 3, xForMs(begin));
             const int x1 = std::min(width() - 2, xForMs(end));
             if (x1 <= x0) continue;
-            QColor region = c;
-            region.setAlpha(56);
-            p.fillRect(QRect(x0, y + 6, x1 - x0, laneHeight - 12), region);
-            p.setPen(c);
-            p.drawRect(QRect(x0, y + 6, x1 - x0, laneHeight - 12));
+            // Keep the track's stored color intact, but tone down the
+            // arrangement presentation so saturated source colors don't
+            // become opaque, hard-to-read blocks on the dark canvas.
+            QColor accent = c.isValid() ? c : QColor("#7EA4D4");
+            int hue = 0, saturation = 0, lightness = 0, alpha = 255;
+            accent.getHsl(&hue, &saturation, &lightness, &alpha);
+            if (hue >= 0) {
+                accent.setHsl(hue, std::clamp(saturation, 65, 135),
+                              std::clamp(lightness, 100, 160));
+            }
+            QColor noteColor = accent;
+            noteColor = noteColor.lighter(145);
+            QColor regionFill = accent;
+            regionFill.setAlpha(chosen ? 66 : 44);
+            const QRect regionRect(x0, y + 6, x1 - x0, laneHeight - 12);
+            p.fillRect(regionRect, regionFill);
+            // A previous lane leaves the painter's brush set to a solid note
+            // color. Explicitly disable it before drawing the next outline.
+            // Otherwise drawRect fills the entire region with that solid color.
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(accent, chosen ? 2 : 1));
+            p.drawRect(regionRect.adjusted(0, 0, -1, -1));
             p.setPen(Qt::NoPen);
-            p.setBrush(c);
+            p.setBrush(noteColor);
             const int range = std::max(1, high - low);
             for (const auto &n : notes) {
                 const int sx = std::max(x0 + 1, xForMs(n.beginMs));
                 const int ex = std::min(x1 - 1, xForMs(n.endMs));
                 if (ex < x0 || sx >= x1 || ex <= sx) continue;
                 const int ny = y + 90 - ((n.pitch - low) * 66 / range);
-                p.drawRect(QRect(sx, ny, std::max(1, ex - sx), 3));
+                p.drawRect(QRect(sx, ny, std::max(1, ex - sx), 4));
             }
+            p.setBrush(Qt::NoBrush);
         }
 
         // Draw the header boundary first, then put the bright playback line on

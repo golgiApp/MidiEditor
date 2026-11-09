@@ -267,7 +267,7 @@ target("installer") do
                 local package_argv = {
                     "--config", "scripts/packaging/windows/config.xml",
                     "--packages", "packaging",
-                    path.join(config.buildir(), "website", "MidiEditor.exe")
+                    path.join(config.buildir(), "website", "XIVMidiStudio_Installer.exe")
                 }
                 os.iorunv(binarycreator_path, package_argv)
                 os.cp("manual/*", path.join(config.buildir(), "website"))
