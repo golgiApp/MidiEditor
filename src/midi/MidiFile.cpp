@@ -37,6 +37,7 @@
 #include "MidiChannel.h"
 #include "MidiTrack.h"
 #include "InstrumentDefinitions.h"
+#include "../support/MidiIntervalEdit.h"
 #include "math.h"
 #include <algorithm>
 
@@ -2257,48 +2258,73 @@ void MidiFile::deleteMeasures(int from, int to) {
     meterAt(tickTo, &num, &denom, &lastTimeSig);
     ProtocolEntry *toCopy = copy();
 
-    // Delete all events. For notes, only delete if starting within the given tick range.
+    // Treat the deleted time range as [tickFrom, tickTo): its right boundary
+    // belongs to the NEXT measure and must never be deleted. Note-on and
+    // note-off events are edited as one interval, not as unrelated points.
+    // The file-level ProtocolEntry snapshot below keeps this atomic for Undo.
     for (int ch = 0; ch < 19; ch++) {
-        QMultiMap<int, MidiEvent *>::Iterator it = channel(ch)->eventMap()->begin();
-        QList<MidiEvent *> toRemove;
-        while (it != channel(ch)->eventMap()->end()) {
-            if (it.key() >= tickFrom && it.key() <= tickTo) {
-                OffEvent *offEvent = dynamic_cast<OffEvent *>(it.value());
-                if (!offEvent) {
-                    // Only remove if no off-event, off-event are handled separately
-                    toRemove.append(it.value());
+        MidiChannel *c = channel(ch);
+        const QList<MidiEvent *> snapshot = c->eventMap()->values();
 
-                    OnEvent *onEvent = dynamic_cast<OnEvent *>(it.value());
-                    if (onEvent) {
-                        OffEvent *offEventOfRemovedNote = onEvent->offEvent();
-                        toRemove.append(offEventOfRemovedNote);
+        struct NoteChange {
+            NoteOnEvent *on;
+            OffEvent *off;
+            MidiIntervalEdit::Result result;
+        };
+        QList<NoteChange> noteChanges;
+        QList<MidiEvent *> pointsToRemove;
+        QList<QPair<MidiEvent *, int>> pointsToMove;
+
+        // Work from a stable snapshot: all new timestamps are calculated
+        // BEFORE mutating the event map.
+        for (MidiEvent *event : snapshot) {
+            if (NoteOnEvent *on = dynamic_cast<NoteOnEvent *>(event)) {
+                OffEvent *off = on->offEvent();
+                if (off) {
+                    noteChanges.append({on, off, MidiIntervalEdit::removeTime(
+                        on->midiTime(), off->midiTime(), tickFrom, tickTo)});
+                } else {
+                    // Gracefully handle a malformed orphan note-on.
+                    int newTick = 0;
+                    if (!MidiIntervalEdit::mapPoint(on->midiTime(), tickFrom,
+                                                     tickTo, newTick)) {
+                        pointsToRemove.append(on);
+                    } else if (newTick != on->midiTime()) {
+                        pointsToMove.append(qMakePair(static_cast<MidiEvent *>(on), newTick));
                     }
                 }
+                continue;
             }
-            it++;
-        }
-
-        foreach(MidiEvent* event, toRemove) {
-            channel(ch)->removeEvent(event);
-        }
-    }
-
-    // All remaining events after the end tick have to be shifted. Note: off events that still
-    // exist inbetween the deleted interval are not shifted, since this would cause negative
-    // duration.
-    for (int ch = 0; ch < 19; ch++) {
-        QList<MidiEvent *> toUpdate;
-        QMultiMap<int, MidiEvent *>::Iterator it = channel(ch)->eventMap()->begin();
-        while (it != channel(ch)->eventMap()->end()) {
-            if (it.key() > tickTo) {
-                toUpdate.append(it.value());
+            if (OffEvent *off = dynamic_cast<OffEvent *>(event)) {
+                if (off->onEvent()) continue; // Edited with its note-on.
+                // Malformed orphan note-off: treat it as an isolated event.
             }
-            it++;
+
+            int newTick = 0;
+            if (!MidiIntervalEdit::mapPoint(event->midiTime(), tickFrom,
+                                             tickTo, newTick)) {
+                pointsToRemove.append(event);
+            } else if (newTick != event->midiTime()) {
+                pointsToMove.append(qMakePair(event, newTick));
+            }
         }
 
-        foreach(MidiEvent *event, toUpdate) {
-            event->setMidiTime(event->midiTime() - (tickTo - tickFrom));
+        // Remove whole notes as note-on / paired-off units. Shorten or
+        // ripple surviving notes by adjusting BOTH ends of the pair.
+        for (const NoteChange &change : noteChanges) {
+            if (!change.result.keep) {
+                c->removeEvent(change.on, false);
+            } else {
+                if (change.on->midiTime() != change.result.start)
+                    change.on->setMidiTime(change.result.start, false);
+                if (change.off->midiTime() != change.result.end)
+                    change.off->setMidiTime(change.result.end, false);
+            }
         }
+        for (MidiEvent *event : pointsToRemove)
+            c->removeEvent(event, false);
+        for (const auto &move : pointsToMove)
+            move.first->setMidiTime(move.second, false);
     }
 
     // Check meter again. If changed, add event to readjust.
