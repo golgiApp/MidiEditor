@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <QComboBox>
 #include <QFontMetrics>
+#include <QFont>
 #include <QApplication>
 #include <QLineEdit>
 #include <QTextEdit>
@@ -63,9 +64,6 @@
 #include "FileLengthDialog.h"
 #include "TrimStartDialog.h"
 #include "InstrumentChooser.h"
-#include "SoundFontPresetPicker.h"
-#include "../MidiEvent/ControlChangeEvent.h"
-#include <QSet>
 #include "../midi/InstrumentDefinitions.h"
 #include "LayoutSettingsWidget.h"
 #include "SplitChannelsDialog.h"
@@ -73,6 +71,7 @@
 #include "ArrangementWidget.h"
 #include "../midi/PlayerThread.h"
 #include <QScrollArea>
+#include <QVBoxLayout>
 #include "GameSupportSettingsWidget.h"
 #include "FFXIVFixerDialog.h"
 #include "../support/FFXIVChannelFixer.h"
@@ -157,6 +156,16 @@ MainWindow::MainWindow(QString initFile)
     file = 0;
     _settings = Appearance::settings(this);
     _showAllTracksInPianoRoll = _settings->value("ffxiv/piano_roll_show_all_tracks", false).toBool();
+    // v0.2.6: default the new FFXIV workspace to the existing Material Dark
+    // theme. Keep the user's prior theme so the header button can restore it.
+    const bool modernDarkWorkspace = _settings->value("ffxiv/modern_dark_workspace", true).toBool();
+    if (modernDarkWorkspace) {
+        if (!_settings->contains("ffxiv/previous_application_theme")) {
+            _settings->setValue("ffxiv/previous_application_theme",
+                                _settings->value("application_theme", int(Appearance::ThemeAuto)));
+        }
+        _settings->setValue("application_theme", int(Appearance::ThemeMaterialDark));
+    }
 
     _moveSelectedEventsToChannelMenu = 0;
     _moveSelectedEventsToTrackMenu = 0;
@@ -323,10 +332,56 @@ MainWindow::MainWindow(QString initFile)
     QWidget *placeholder0 = new QWidget(matrixArea);
     placeholder0->setFixedHeight(50);
     matrixAreaLayout->setContentsMargins(0, 0, 0, 0);
-    matrixAreaLayout->addWidget(matrixContainer, 0, 0, 2, 1);
-    matrixAreaLayout->addWidget(placeholder0, 0, 1, 1, 1);
-    matrixAreaLayout->addWidget(vert, 1, 1, 1, 1);
+    matrixAreaLayout->setVerticalSpacing(0);
+
+    // v0.2.6: a compact, always-visible Piano Roll header with a true
+    // Selected Track / All Tracks toggle. Both buttons use the exact same
+    // QAction as View -> Show All Tracks, so every entry point stays in sync.
+    QWidget *pianoHeader = new QWidget(matrixArea);
+    pianoHeader->setObjectName(QStringLiteral("ffxivPianoHeader"));
+    pianoHeader->setFixedHeight(40);
+    pianoHeader->setStyleSheet(QStringLiteral(
+        "QWidget#ffxivPianoHeader { background:#292F39; border-bottom:1px solid #434C59; }"
+        "QLabel { color:#E7ECF4; background:transparent; border:none; }"
+        "QToolButton { color:#BFC8D5; background:#373F4B; border:1px solid #4A5665;"
+        "  border-radius:5px; padding:4px 10px; font-weight:500; }"
+        "QToolButton:hover { color:white; background:#495566; }"
+        "QToolButton:checked { color:#FFFFFF; background:#446B97; border-color:#6194C8; }"));
+    auto *pianoHeaderLayout = new QHBoxLayout(pianoHeader);
+    pianoHeaderLayout->setContentsMargins(12, 3, 9, 3);
+    pianoHeaderLayout->setSpacing(6);
+    QLabel *pianoTitle = new QLabel(tr("PIANO ROLL"), pianoHeader);
+    QFont titleFont = pianoTitle->font();
+    titleFont.setBold(true);
+    pianoTitle->setFont(titleFont);
+    pianoHeaderLayout->addWidget(pianoTitle);
+    _pianoRollTrackLabel = new QLabel(tr("Select a track"), pianoHeader);
+    _pianoRollTrackLabel->setStyleSheet(QStringLiteral("color:#99A9BD; padding-left:9px;"));
+    pianoHeaderLayout->addWidget(_pianoRollTrackLabel);
+    pianoHeaderLayout->addStretch(1);
+    _pianoRollShowSelectedButton = new QToolButton(pianoHeader);
+    _pianoRollShowSelectedButton->setText(tr("Selected Track"));
+    _pianoRollShowSelectedButton->setCheckable(true);
+    _pianoRollShowSelectedButton->setToolTip(tr("Show only notes from the selected arrangement track"));
+    pianoHeaderLayout->addWidget(_pianoRollShowSelectedButton);
+    _pianoRollShowAllButton = new QToolButton(pianoHeader);
+    _pianoRollShowAllButton->setText(tr("All Tracks"));
+    _pianoRollShowAllButton->setCheckable(true);
+    _pianoRollShowAllButton->setToolTip(tr("Stack the notes from every visible instrument (Ctrl+Alt+G)"));
+    pianoHeaderLayout->addWidget(_pianoRollShowAllButton);
+    _modernDarkWorkspaceButton = new QToolButton(pianoHeader);
+    _modernDarkWorkspaceButton->setText(tr("Dark UI"));
+    _modernDarkWorkspaceButton->setCheckable(true);
+    _modernDarkWorkspaceButton->setToolTip(tr("Use the modern dark editor palette; toggle to restore your previous theme"));
+    pianoHeaderLayout->addSpacing(8);
+    pianoHeaderLayout->addWidget(_modernDarkWorkspaceButton);
+
+    matrixAreaLayout->addWidget(pianoHeader, 0, 0, 1, 2);
+    matrixAreaLayout->addWidget(matrixContainer, 1, 0, 2, 1);
+    matrixAreaLayout->addWidget(placeholder0, 1, 1, 1, 1);
+    matrixAreaLayout->addWidget(vert, 2, 1, 1, 1);
     matrixAreaLayout->setColumnStretch(0, 1);
+    matrixAreaLayout->setRowStretch(2, 1);
     matrixArea->setLayout(matrixAreaLayout);
 
     bool screenLocked = _settings->value("screen_locked", false).toBool();
@@ -336,7 +391,15 @@ MainWindow::MainWindow(QString initFile)
 
     // VelocityArea
     QWidget *velocityArea = new QWidget(leftSplitter);
+    velocityArea->setObjectName(QStringLiteral("ffxivVelocityArea"));
     velocityArea->setContentsMargins(0, 0, 0, 0);
+    velocityArea->setStyleSheet(QStringLiteral(
+        "QWidget#ffxivVelocityArea { background:#262C35; border-top:1px solid #414B59; }"
+        "QComboBox { background:#343E4B; color:#E1E8F2; border:1px solid #556273;"
+        "  border-radius:4px; padding:3px 4px; min-height:19px; }"
+        "QToolButton { background:#374250; color:#E1E8F2; border:1px solid #536175;"
+        "  border-radius:4px; padding:3px; }"
+        "QToolButton:checked { background:#446B97; border-color:#6194C8; }"));
     leftSplitter->addWidget(velocityArea);
     
     QGridLayout *velocityAreaLayout = new QGridLayout(velocityArea);
@@ -493,7 +556,23 @@ MainWindow::MainWindow(QString initFile)
 
     // Logic-inspired track arrangement above the editable Piano Roll.
     // This is a separate display: MIDI events are still owned by MidiFile.
-    QScrollArea *arrangementArea = new QScrollArea(leftSplitter);
+    QWidget *arrangementPane = new QWidget(leftSplitter);
+    auto *arrangementLayout = new QVBoxLayout(arrangementPane);
+    arrangementLayout->setContentsMargins(0, 0, 0, 0);
+    arrangementLayout->setSpacing(0);
+    QToolBar *arrangementTB = new QToolBar(arrangementPane);
+    arrangementTB->setIconSize(QSize(19, 19));
+    arrangementTB->setMovable(false);
+    arrangementTB->setFixedHeight(36);
+    arrangementTB->setStyleSheet(QStringLiteral(
+        "QToolBar { background:#2B3038; border:none; padding:2px 8px; spacing:4px; }"
+        "QToolButton { color:#F0F3F8; padding:3px; }"));
+    auto *trackHeading = new QLabel(tr("TRACKS"), arrangementTB);
+    trackHeading->setStyleSheet(QStringLiteral("color:#CED5E0; font-weight:bold; padding-right:9px;"));
+    arrangementTB->addWidget(trackHeading);
+    arrangementLayout->addWidget(arrangementTB);
+
+    QScrollArea *arrangementArea = new QScrollArea(arrangementPane);
     arrangementArea->setObjectName(QStringLiteral("ffxivArrangementScrollArea"));
     arrangementArea->setWidgetResizable(true);
     arrangementArea->setFrameShape(QFrame::NoFrame);
@@ -502,12 +581,29 @@ MainWindow::MainWindow(QString initFile)
         "QScrollArea#ffxivArrangementScrollArea { background: #202329; border: none; }"));
     _arrangementWidget = new ArrangementWidget(arrangementArea);
     arrangementArea->setWidget(_arrangementWidget);
-    leftSplitter->insertWidget(0, arrangementArea);
+    arrangementLayout->addWidget(arrangementArea);
+    leftSplitter->insertWidget(0, arrangementPane);
     _arrangementWidget->selectTrackRequested = [this](MidiTrack *track) {
         editTrackAndChannel(track);
     };
-    _arrangementWidget->soundFontPresetRequested = [this](MidiTrack *track) {
-        chooseSoundFontForTrack(track);
+    _arrangementWidget->trackMenuRequested = [this](MidiTrack *track, const QPoint &globalPos) {
+        if (_trackWidget) _trackWidget->showTrackContextMenu(track, globalPos);
+    };
+    _arrangementWidget->renameTrackRequested = [this](MidiTrack *track) {
+        if (track && file && file->tracks()->contains(track)) renameTrack(track->number());
+    };
+    _arrangementWidget->cloneTrackRequested = [this](MidiTrack *track) {
+        if (track && file && file->tracks()->contains(track)) cloneTrack(track);
+    };
+    _arrangementWidget->removeTrackRequested = [this](MidiTrack *track) {
+        if (!track || !file || !file->tracks()->contains(track)) return;
+        const QString name = track->name().isEmpty() ?
+            tr("Track %1").arg(track->number() + 1) : track->name();
+        if (QMessageBox::question(this, tr("Delete Track"),
+                tr("Remove '%1' and all its MIDI events? You can undo this action.").arg(name),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
+            removeTrack(track->number());
+        }
     };
     _arrangementWidget->scrollTimeRequested = [this](int ms) {
         if (hori) hori->setValue(ms);
@@ -601,6 +697,23 @@ MainWindow::MainWindow(QString initFile)
     }
     _fixXIVChannelsTracksAction->setVisible(false);
 
+    // Global track controls now live immediately above the arrangement lanes.
+    // Per-track controls (V/M/S/R/C/Delete/More) are in ArrangementWidget.
+    newTrack->setToolTip(tr("Add new MIDI track"));
+    _allTracksAudible->setToolTip(tr("Unmute all tracks"));
+    _allTracksMute->setToolTip(tr("Mute all tracks"));
+    _allTracksVisible->setToolTip(tr("Show all tracks in Piano Roll"));
+    _allTracksInvisible->setToolTip(tr("Hide all tracks in Piano Roll"));
+    arrangementTB->addAction(newTrack);
+    arrangementTB->addSeparator();
+    arrangementTB->addAction(_allTracksAudible);
+    arrangementTB->addAction(_allTracksMute);
+    arrangementTB->addSeparator();
+    arrangementTB->addAction(_allTracksVisible);
+    arrangementTB->addAction(_allTracksInvisible);
+    arrangementTB->addSeparator();
+    arrangementTB->addAction(_fixXIVChannelsTracksAction);
+
     _trackWidget = new TrackListWidget(tracksWidget);
     connect(_trackWidget, SIGNAL(trackRenameClicked(int)), this, SLOT(renameTrack(int)), Qt::QueuedConnection);
     connect(_trackWidget, SIGNAL(trackRemoveClicked(int)), this, SLOT(removeTrack(int)), Qt::QueuedConnection);
@@ -622,7 +735,8 @@ MainWindow::MainWindow(QString initFile)
     connect(_trackWidget, SIGNAL(trackClicked(MidiTrack*)), this, SLOT(editTrackAndChannel(MidiTrack*)), Qt::QueuedConnection);
 
     tracksLayout->addWidget(_trackWidget, 1, 0, 1, 1);
-    upperTabWidget->addTab(tracksWidget, tr("Tracks"));
+    // Do not add a second visible Tracks tab: its action controller is reused
+    // by the arrangement lane context menus on the left.
 
     // Channels
     channelsWidget = new QWidget(upperTabWidget);
@@ -726,13 +840,19 @@ MainWindow::MainWindow(QString initFile)
     connect(_chooseEditTrack, SIGNAL(activated(int)), this, SLOT(editTrack(int)));
     chooserLayout->addWidget(_chooseEditTrack);
 
-    _chooseEditChannel = new QComboBox(chooserWidget);
+    _chooseEditChannel = new QComboBox(arrangementTB);
     for (int i = 0; i < 16; i++) {
         if (i == 9) _chooseEditChannel->addItem(tr("Percussion Channel"));
         else _chooseEditChannel->addItem(tr("Channel %1: %2").arg(i).arg(MidiFile::instrumentName(0)));
     }
     connect(_chooseEditChannel, SIGNAL(activated(int)), this, SLOT(editChannel(int)));
-    chooserLayout->addWidget(_chooseEditChannel);
+    arrangementTB->addWidget(new QLabel(tr("New notes:"), arrangementTB));
+    _chooseEditChannel->setMinimumWidth(185);
+    _chooseEditChannel->setMaximumWidth(240);
+    arrangementTB->addWidget(_chooseEditChannel);
+    // The track selector is unnecessary when clicking a left-side lane selects
+    // the editing track. Keep its widget and event wiring for compatibility.
+    chooserWidget->hide();
     // connect Scrollbars and Widgets
     // Connect to the actual displayed widget (OpenGL or software)
     connect(vert, SIGNAL(valueChanged(int)), matrixContainer, SLOT(scrollYChanged(int)));
@@ -920,10 +1040,6 @@ void MainWindow::setFile(MidiFile *newFile) {
     // Store reference to old file for cleanup
     MidiFile *oldFile = this->file;
 
-#ifdef FLUIDSYNTH_SUPPORT
-    // Do not carry transient SoundFont preview overrides into another song.
-    FluidSynthEngine::instance()->clearChannelPresets();
-#endif
     EventTool::clearSelection();
     Selection::setFile(newFile);
 
@@ -3915,6 +4031,11 @@ void MainWindow::editTrack(int i, bool assign) {
         EventTool::clearSelection(); // Prevent edits to notes hidden by the new track focus.
     }
     if (_arrangementWidget) _arrangementWidget->setSelectedTrack(focused);
+    if (_pianoRollTrackLabel) {
+        const QString name = focused ? focused->name() : QString();
+        _pianoRollTrackLabel->setText(!name.isEmpty() ? name :
+                (focused ? tr("Track %1").arg(i + 1) : tr("Select a track")));
+    }
     if (mw_matrixWidget) mw_matrixWidget->setFocusedTrack(_showAllTracksInPianoRoll ? nullptr : focused);
     if (_matrixWidgetContainer) _matrixWidgetContainer->update();
 
@@ -4001,127 +4122,6 @@ void MainWindow::editTrackAndChannel(MidiTrack *track) {
     }
 
     editChannel(focusCh, false);
-}
-
-void MainWindow::chooseSoundFontForTrack(MidiTrack *track) {
-#ifdef FLUIDSYNTH_SUPPORT
-    if (!file || !track || !file->tracks()->contains(track)) return;
-    if (!MidiOutput::isFluidSynthOutput()) {
-        QMessageBox::information(this, tr("SoundFont Presets"),
-            tr("Choose FluidSynth (Built-in Synthesizer) as your MIDI output first. "
-               "SoundFont presets are available only through FluidSynth."));
-        return;
-    }
-    auto *engine = FluidSynthEngine::instance();
-    const auto presets = engine->availablePresets();
-    if (presets.isEmpty()) {
-        QMessageBox::information(this, tr("No SoundFont Presets"),
-            tr("No presets are loaded yet. Enable a SoundFont in MIDI settings, "
-               "allow it to finish loading, then open the SoundFont browser again."));
-        return;
-    }
-
-    SoundFontPresetPicker dialog(track->name(), presets, this);
-    if (dialog.exec() != QDialog::Accepted) return;
-    const auto selected = dialog.selectedPreset();
-
-    // MIDI program, bank and SoundFont selections are channel properties.
-    // Derive the channel from notes rather than trusting an outdated default.
-    QSet<int> trackChannels;
-    QSet<MidiTrack *> sharedTracks;
-    for (int ch = 0; ch < 16; ++ch) {
-        const auto *events = file->channelEvents(ch);
-        for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
-            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
-            if (!note || note->velocity() <= 0) continue;
-            if (note->track() == track) trackChannels.insert(ch);
-        }
-    }
-    int channel = -1;
-    if (!trackChannels.isEmpty())
-        channel = *std::min_element(trackChannels.cbegin(), trackChannels.cend());
-    else channel = track->assignedChannel();
-    if (channel < 0 || channel >= 16) {
-        QMessageBox::warning(this, tr("SoundFont Presets"),
-            tr("Cannot determine a valid MIDI channel for this track."));
-        return;
-    }
-    if (trackChannels.size() > 1) {
-        QMessageBox::information(this, tr("Track Uses Multiple MIDI Channels"),
-            tr("This track uses %1 channels. Only channel %2 will be changed. "
-               "Split the track by channel to assign independent sounds.")
-               .arg(trackChannels.size()).arg(channel + 1));
-    }
-    const auto *events = file->channelEvents(channel);
-    for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
-        auto *note = dynamic_cast<NoteOnEvent *>(it.value());
-        if (note && note->velocity() > 0 && note->track() && note->track() != track)
-            sharedTracks.insert(note->track());
-    }
-    if (!sharedTracks.isEmpty()) {
-        const auto answer = QMessageBox::warning(this, tr("Shared MIDI Channel"),
-            tr("This track shares MIDI channel %1 with %2 other track(s). "
-               "MIDI instruments are channel-based, so the selected preset "
-               "will also affect those tracks. Continue?")
-               .arg(channel + 1).arg(sharedTracks.size()),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (answer != QMessageBox::Yes) return;
-    }
-    if (!engine->setChannelPreset(channel, selected)) {
-        QMessageBox::warning(this, tr("SoundFont Not Available"),
-            tr("The SoundFont is no longer loaded. Check your SoundFont settings and retry."));
-        return;
-    }
-
-    // The preset name becomes the actual MIDI track name (not merely the
-    // temporary label in the arrangement header). MidiTrack::setName writes
-    // the track-name meta event, so saving the .mid retains the new name.
-    // Only this chosen track is renamed, even if its channel is shared.
-    const QString presetName = selected.name.trimmed();
-    const bool renameTrackToPreset = !presetName.isEmpty() && track->name() != presetName;
-    const bool writeMidiAssignment = dialog.writeMidiAssignment();
-
-    if (renameTrackToPreset || writeMidiAssignment) {
-        // Changing MIDI events while playing is unsafe. A preview-only
-        // selection still renames the track, but never rewrites bank/program.
-        if (writeMidiAssignment && MidiPlayer::isPlaying()) stop();
-
-        // Group the rename and optional MIDI instrument assignment into one
-        // reversible Undo/Redo operation.
-        file->protocol()->startNewAction(tr("Assign SoundFont Preset: %1").arg(selected.name));
-        if (writeMidiAssignment) {
-            // MIDI bank and program changes are portable; the SoundFont path
-            // itself cannot be embedded in a Standard MIDI File.
-            MidiChannel *midiChannel = file->channel(channel);
-            QList<MidiEvent *> superseded;
-            for (auto *ev : midiChannel->eventMap()->values()) {
-                if (ev->track() != track) continue;
-                if (dynamic_cast<ProgChangeEvent *>(ev)) {
-                    superseded.append(ev);
-                } else if (auto *cc = dynamic_cast<ControlChangeEvent *>(ev)) {
-                    if (cc->control() == 0 || cc->control() == 32) superseded.append(ev);
-                }
-            }
-            for (auto *ev : superseded) midiChannel->removeEvent(ev);
-            // Bank Select MSB, Bank Select LSB, Program Change at tick zero.
-            const int bank = std::clamp(selected.bank, 0, 16383);
-            midiChannel->insertEvent(new ControlChangeEvent(channel, 0, (bank >> 7) & 0x7F, track), 0);
-            midiChannel->insertEvent(new ControlChangeEvent(channel, 32, bank & 0x7F, track), 0);
-            midiChannel->insertEvent(new ProgChangeEvent(channel, selected.program, track), 0);
-        }
-        if (renameTrackToPreset) track->setName(presetName);
-        file->protocol()->endAction();
-        if (renameTrackToPreset) updateTrackMenu();
-    }
-    if (_arrangementWidget)
-        _arrangementWidget->setTrackPresetLabel(track, selected.name);
-    statusBar()->showMessage(tr("SoundFont preview: %1 (bank %2, program %3) on MIDI channel %4")
-        .arg(selected.name).arg(selected.bank).arg(selected.program).arg(channel + 1), 8000);
-#else
-    Q_UNUSED(track);
-    QMessageBox::information(this, tr("SoundFont Presets"),
-        tr("This build does not include FluidSynth."));
-#endif
 }
 
 void MainWindow::setInstrumentForChannel(int channel) {
@@ -5255,6 +5255,65 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
         if (_miscWidgetContainer) _miscWidgetContainer->update();
     });
     viewMB->addAction(_showAllTracksInPianoRollAction);
+    // The visible switch and keyboard/menu toggle control the same action.
+    connect(_pianoRollShowSelectedButton, &QToolButton::clicked, this, [this]() {
+        if (_showAllTracksInPianoRollAction->isChecked())
+            _showAllTracksInPianoRollAction->setChecked(false);
+        _pianoRollShowSelectedButton->setChecked(true);
+        _pianoRollShowAllButton->setChecked(false);
+    });
+    connect(_pianoRollShowAllButton, &QToolButton::clicked, this, [this]() {
+        if (!_showAllTracksInPianoRollAction->isChecked())
+            _showAllTracksInPianoRollAction->setChecked(true);
+        _pianoRollShowSelectedButton->setChecked(false);
+        _pianoRollShowAllButton->setChecked(true);
+    });
+    connect(_showAllTracksInPianoRollAction, &QAction::toggled, this, [this](bool all) {
+        _pianoRollShowSelectedButton->setChecked(!all);
+        _pianoRollShowAllButton->setChecked(all);
+    });
+    _pianoRollShowSelectedButton->setChecked(!_showAllTracksInPianoRoll);
+    _pianoRollShowAllButton->setChecked(_showAllTracksInPianoRoll);
+
+    _modernDarkWorkspaceAction = new QAction(tr("Modern Dark Workspace"), this);
+    _modernDarkWorkspaceAction->setCheckable(true);
+    _modernDarkWorkspaceAction->setChecked(_settings->value("ffxiv/modern_dark_workspace", true).toBool());
+    connect(_modernDarkWorkspaceAction, &QAction::toggled, this, [this](bool on) {
+        _settings->setValue("ffxiv/modern_dark_workspace", on);
+        if (on) {
+            if (!_settings->contains("ffxiv/previous_application_theme")) {
+                _settings->setValue("ffxiv/previous_application_theme",
+                                    int(Appearance::applicationTheme()));
+            }
+            Appearance::setApplicationTheme(Appearance::ThemeMaterialDark);
+        } else {
+            const int priorTheme = _settings->value("ffxiv/previous_application_theme",
+                                                    int(Appearance::ThemeAuto)).toInt();
+            Appearance::setApplicationTheme(static_cast<Appearance::ApplicationTheme>(priorTheme));
+            _settings->remove("ffxiv/previous_application_theme");
+        }
+        _modernDarkWorkspaceButton->setChecked(on);
+        Appearance::refreshColors();
+        if (mw_matrixWidget) mw_matrixWidget->registerRelayout();
+        if (_matrixWidgetContainer) _matrixWidgetContainer->update();
+        if (_miscWidgetContainer) _miscWidgetContainer->update();
+    });
+    connect(_modernDarkWorkspaceButton, &QToolButton::clicked, this, [this]() {
+        _modernDarkWorkspaceAction->setChecked(!_modernDarkWorkspaceAction->isChecked());
+    });
+    _modernDarkWorkspaceButton->setChecked(_modernDarkWorkspaceAction->isChecked());
+    viewMB->addAction(_modernDarkWorkspaceAction);
+
+    QAction *showDetails = new QAction(tr("Show Channel and Event Panels"), this);
+    showDetails->setCheckable(true);
+    showDetails->setChecked(_settings->value("ffxiv/show_detail_panels", false).toBool());
+    showDetails->setToolTip(tr("Show the optional Channel, Protocol and Event inspectors"));
+    connect(showDetails, &QAction::toggled, this, [this](bool show) {
+        if (rightSplitter) rightSplitter->setVisible(show);
+        _settings->setValue("ffxiv/show_detail_panels", show);
+    });
+    viewMB->addAction(showDetails);
+    if (rightSplitter) rightSplitter->setVisible(showDetails->isChecked());
     viewMB->addSeparator();
 
     viewMB->addAction(_allTracksVisible);

@@ -58,6 +58,7 @@ class SelectionNavigator;
 class TweakTarget;
 class UpdateChecker;
 class QLabel;
+class QToolButton;
 class SettingsDialog;
 class UpdateManager;
 class QJsonObject;
@@ -535,7 +536,6 @@ public slots:
     void removeTrack(int tracknumber);
 
     void setInstrumentForChannel(int i);
-    void chooseSoundFontForTrack(MidiTrack *track);
 
     void spreadSelection();
 
@@ -1035,6 +1035,12 @@ private:
     // FFXIV workspace: show selected instrument or original stacked multi-track roll.
     bool _showAllTracksInPianoRoll = false;
     QAction *_showAllTracksInPianoRollAction = nullptr;
+    // v0.2.6: visible editor mode buttons and matching dark workspace action.
+    QToolButton *_pianoRollShowSelectedButton = nullptr;
+    QToolButton *_pianoRollShowAllButton = nullptr;
+    QToolButton *_modernDarkWorkspaceButton = nullptr;
+    QLabel *_pianoRollTrackLabel = nullptr;
+    QAction *_modernDarkWorkspaceAction = nullptr;
 
     // === Game Support Actions ===
 
