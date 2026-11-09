@@ -339,14 +339,18 @@ MainWindow::MainWindow(QString initFile)
     // QAction as View -> Show All Tracks, so every entry point stays in sync.
     QWidget *pianoHeader = new QWidget(matrixArea);
     pianoHeader->setObjectName(QStringLiteral("ffxivPianoHeader"));
-    pianoHeader->setFixedHeight(40);
+    pianoHeader->setFixedHeight(46);
     pianoHeader->setStyleSheet(QStringLiteral(
-        "QWidget#ffxivPianoHeader { background:#292F39; border-bottom:1px solid #434C59; }"
-        "QLabel { color:#E7ECF4; background:transparent; border:none; }"
-        "QToolButton { color:#BFC8D5; background:#373F4B; border:1px solid #4A5665;"
-        "  border-radius:5px; padding:4px 10px; font-weight:500; }"
-        "QToolButton:hover { color:white; background:#495566; }"
-        "QToolButton:checked { color:#FFFFFF; background:#446B97; border-color:#6194C8; }"));
+        "QWidget#ffxivPianoHeader { background:#222B37; border-bottom:1px solid #526173; }"
+        "QWidget#ffxivPianoHeader QLabel { color:#F0F5FC; background:transparent; border:none; }"
+        "QWidget#ffxivPianoHeader QToolButton { color:#EAF0F8; background:#354455;"
+        "  border:1px solid #62738A; border-radius:6px; min-height:25px;"
+        "  padding:3px 13px; font-weight:600; }"
+        "QWidget#ffxivPianoHeader QToolButton:hover { color:#FFFFFF; background:#46617B; }"
+        "QWidget#ffxivPianoHeader QToolButton:checked { color:#FFFFFF; background:#1466A2;"
+        "  border-color:#59ABF2; }"
+        "QWidget#ffxivPianoHeader QToolButton:disabled { color:#8492A4;"
+        "  background:#2D3745; border-color:#445164; }"));
     auto *pianoHeaderLayout = new QHBoxLayout(pianoHeader);
     pianoHeaderLayout->setContentsMargins(12, 3, 9, 3);
     pianoHeaderLayout->setSpacing(6);
@@ -356,7 +360,7 @@ MainWindow::MainWindow(QString initFile)
     pianoTitle->setFont(titleFont);
     pianoHeaderLayout->addWidget(pianoTitle);
     _pianoRollTrackLabel = new QLabel(tr("Select a track"), pianoHeader);
-    _pianoRollTrackLabel->setStyleSheet(QStringLiteral("color:#99A9BD; padding-left:9px;"));
+    _pianoRollTrackLabel->setStyleSheet(QStringLiteral("color:#C9D6E6; padding-left:12px;"));
     pianoHeaderLayout->addWidget(_pianoRollTrackLabel);
     pianoHeaderLayout->addStretch(1);
     _pianoRollShowSelectedButton = new QToolButton(pianoHeader);
@@ -565,8 +569,13 @@ MainWindow::MainWindow(QString initFile)
     arrangementTB->setMovable(false);
     arrangementTB->setFixedHeight(36);
     arrangementTB->setStyleSheet(QStringLiteral(
-        "QToolBar { background:#2B3038; border:none; padding:2px 8px; spacing:4px; }"
-        "QToolButton { color:#F0F3F8; padding:3px; }"));
+        "QToolBar { background:#27303C; border-bottom:1px solid #455568;"
+        "  padding:3px 9px; spacing:5px; }"
+        "QToolBar QToolButton { color:#EDF3FA; background:#364557;"
+        "  border:1px solid #607389; border-radius:5px; min-width:23px; padding:3px; }"
+        "QToolBar QToolButton:hover { background:#46627F; }"
+        "QToolBar QToolButton:pressed { background:#185C91; }"
+        "QToolBar QToolButton:disabled { color:#808D9F; background:#2B3541; }"));
     auto *trackHeading = new QLabel(tr("TRACKS"), arrangementTB);
     trackHeading->setStyleSheet(QStringLiteral("color:#CED5E0; font-weight:bold; padding-right:9px;"));
     arrangementTB->addWidget(trackHeading);

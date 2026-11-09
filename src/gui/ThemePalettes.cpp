@@ -52,24 +52,66 @@ QString getAmoledStyleSheet() {
 QPalette getMaterialDarkPalette() {
     QPalette palette;
     palette.setColor(QPalette::Window, QColor(30, 29, 35)); // #1e1d23
-    palette.setColor(QPalette::WindowText, QColor(169, 183, 198)); // #a9b7c6
-    palette.setColor(QPalette::Base, QColor(40, 40, 40));
-    palette.setColor(QPalette::AlternateBase, QColor(45, 45, 45));
+    palette.setColor(QPalette::WindowText, QColor(235, 241, 249)); // #a9b7c6
+    palette.setColor(QPalette::Base, QColor(38, 46, 57));
+    palette.setColor(QPalette::AlternateBase, QColor(46, 55, 67));
     palette.setColor(QPalette::ToolTipBase, QColor(50, 50, 50));
     palette.setColor(QPalette::ToolTipText, QColor(230, 230, 230));
-    palette.setColor(QPalette::Text, QColor(169, 183, 198));
-    palette.setColor(QPalette::Button, QColor(40, 40, 40));
-    palette.setColor(QPalette::ButtonText, QColor(169, 183, 198));
+    palette.setColor(QPalette::Text, QColor(235, 241, 249));
+    palette.setColor(QPalette::Button, QColor(38, 46, 57));
+    palette.setColor(QPalette::ButtonText, QColor(235, 241, 249));
     palette.setColor(QPalette::BrightText, Qt::red);
     palette.setColor(QPalette::Link, QColor(4, 185, 127)); // #04b97f
     palette.setColor(QPalette::Highlight, QColor(4, 185, 127));
     palette.setColor(QPalette::HighlightedText, Qt::white);
-    palette.setColor(QPalette::Accent, QColor(4, 185, 127)); 
+    palette.setColor(QPalette::Accent, QColor(4, 185, 127));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(124, 137, 154));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(124, 137, 154));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(124, 137, 154));
     return palette;
 }
 
 QString getMaterialDarkStyleSheet() {
-    return "QToolBar::separator { background-color: rgba(4, 185, 127, 150); width: 1px; height: 1px; margin: 2px; }";
+    // Consistent Qt widget colors on Windows: a dark palette alone can result
+    // in native light popup menus with nearly white (apparently disabled) text.
+    // Keep the actual :disabled style distinct from normal enabled actions.
+    return QStringLiteral(R"QSS(
+        QMenuBar { background-color:#202630; color:#EDF2FA; border-bottom:1px solid #3B4654; }
+        QMenuBar::item { background:transparent; color:#EDF2FA; padding:5px 10px; }
+        QMenuBar::item:selected, QMenuBar::item:pressed {
+            background-color:#39485A; color:#FFFFFF; border-radius:4px;
+        }
+        QMenu { background-color:#232B36; color:#E8EEF8; border:1px solid #536175;
+                padding:5px; }
+        QMenu::item { color:#E8EEF8; background:transparent; min-height:22px;
+                      padding:4px 30px 4px 25px; margin:1px 3px; }
+        QMenu::item:selected { color:#FFFFFF; background:#34659B; border-radius:4px; }
+        QMenu::item:disabled { color:#7B8799; }
+        QMenu::item:disabled:selected { color:#8995A7; background:#2D3745; }
+        QMenu::separator { height:1px; background:#475568; margin:5px 9px; }
+        QMenu::icon { padding-left:5px; }
+        QToolBar { background-color:#242B35; color:#E8EEF8;
+                   border:0; spacing:4px; }
+        QToolBar::separator { background-color:#475567; width:1px;
+                              margin:4px 5px; }
+        QToolButton { color:#EDF2FA; }
+        QToolButton:hover { background-color:#3E5066; }
+        QToolButton:checked { color:#FFFFFF; background-color:#275D93; }
+        QToolButton:disabled { color:#7F8A99; }
+        QPushButton { color:#EDF2FA; background-color:#354353;
+                      border:1px solid #65768A; border-radius:5px;
+                      padding:4px 9px; min-height:22px; }
+        QPushButton:hover { background-color:#46617C; border-color:#8BA6C5; }
+        QPushButton:pressed { background-color:#285C8E; }
+        QPushButton:disabled { color:#8290A2; background-color:#2B3440;
+                               border-color:#465465; }
+        QComboBox { color:#EDF2FA; background-color:#334151;
+                    border:1px solid #60728A; border-radius:4px;
+                    padding:4px 8px; }
+        QComboBox:disabled { color:#8490A0; background-color:#29333F; }
+        QToolTip { color:#F5F7FB; background-color:#303D4E;
+                   border:1px solid #68798E; padding:5px; }
+    )QSS");
 }
 
 QPalette getNordPalette() {

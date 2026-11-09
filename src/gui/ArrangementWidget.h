@@ -57,9 +57,10 @@ public:
         ms = std::max(0, ms);
         if (ms != _originMs) { _originMs = ms; update(); }
     }
-    static constexpr int headerWidth = 305;
-    static constexpr int rulerHeight = 32;
-    static constexpr int laneHeight = 82;
+    static constexpr int headerWidth = 326;
+    static constexpr int rulerHeight = 34;
+    // Two rows of large, readable named actions rather than tiny single letters.
+    static constexpr int laneHeight = 116;
 
     void setFile(MidiFile *file) {
         _file = file;
@@ -154,10 +155,10 @@ protected:
         p.fillRect(0, 0, width(), rulerHeight, QColor("#292D34"));
         p.fillRect(0, 0, headerWidth, height(), QColor("#292D34"));
 
-        p.setFont(QFont(QStringLiteral("Segoe UI"), 9));
-        p.setPen(QColor("#CBD2DF"));
-        p.drawText(QRect(12, 0, headerWidth - 15, rulerHeight), Qt::AlignVCenter,
-                   QStringLiteral("TRACKS  |  + Add above  |  ••• More actions"));
+        p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+        p.setPen(QColor("#E8EFF8"));
+        p.drawText(QRect(14, 0, headerWidth - 18, rulerHeight), Qt::AlignVCenter,
+                   QStringLiteral("TRACKS  /  RIGHT-CLICK FOR ACTIONS"));
         if (!_file) {
             p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, 60),
                        Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("Open a MIDI file"));
@@ -204,25 +205,28 @@ protected:
             p.setPen(QColor("#414753"));
             p.drawLine(0, y + laneHeight - 1, width(), y + laneHeight - 1);
             p.fillRect(0, y + 2, 4, laneHeight - 4, c);
-            p.setPen(QColor("#EEF1F6"));
             const QString name = t->name().trimmed().isEmpty() ?
-                                 QStringLiteral("Track %1").arg(i) : t->name();
+                                 QStringLiteral("Track %1").arg(i + 1) : t->name();
+            p.setFont(QFont(QStringLiteral("Segoe UI"), 11, QFont::DemiBold));
+            p.setPen(QColor("#F4F7FD"));
             QFontMetrics fm(p.font());
-            p.drawText(13, y + 23, fm.elidedText(name, Qt::ElideRight, headerWidth - 27));
-            p.setPen(QColor("#929BAA"));
-            p.drawText(13, y + 41, QStringLiteral("Track %1  ·  Ch %2")
+            p.drawText(14, y + 24, fm.elidedText(name, Qt::ElideRight, headerWidth - 28));
+            p.setFont(QFont(QStringLiteral("Segoe UI"), 9));
+            p.setPen(QColor("#ACBACD"));
+            // ASCII delimiters avoid mojibake on MSVC installations with a
+            // legacy source character set (previously rendered as 'A' + junk).
+            p.drawText(14, y + 44, QStringLiteral("Track %1   |   Channel %2")
                        .arg(i + 1).arg(t->assignedChannel() + 1));
 
-            // All track controls live here, alongside the arrangement lane.
-            // The ellipsis opens the complete legacy track menu (merge, move,
-            // quantize, transpose, explode, FFXIV chord filters, etc.).
-            drawButton(p, visibilityRect(y), QStringLiteral("V"), !t->hidden(), QColor("#5186AE"));
-            drawButton(p, muteRect(y), QStringLiteral("M"), t->muted(), QColor("#B75B61"));
-            drawButton(p, soloRect(y), QStringLiteral("S"), t == _solo, QColor("#C4A45A"));
-            drawButton(p, renameRect(y), QStringLiteral("R"), false, QColor("#7D899B"));
-            drawButton(p, cloneRect(y), QStringLiteral("C"), false, QColor("#7D899B"));
-            drawButton(p, removeRect(y), QStringLiteral("×"), false, QColor("#7D899B"));
-            drawButton(p, actionsRect(y), QStringLiteral("•••"), false, QColor("#7D899B"));
+            // Accessible labels rather than ambiguous V/M/S/R/C buttons.
+            // The second row contains all destructive/management actions.
+            drawButton(p, visibilityRect(y), QStringLiteral("Show"), !t->hidden(), QColor("#1767A4"));
+            drawButton(p, muteRect(y), QStringLiteral("Mute"), t->muted(), QColor("#A83C4B"));
+            drawButton(p, soloRect(y), QStringLiteral("Solo"), t == _solo, QColor("#9B761D"));
+            drawButton(p, renameRect(y), QStringLiteral("Rename"), false, QColor("#55748E"));
+            drawButton(p, cloneRect(y), QStringLiteral("Clone"), false, QColor("#55748E"));
+            drawButton(p, removeRect(y), QStringLiteral("Delete"), false, QColor("#A83C4B"));
+            drawButton(p, actionsRect(y), QStringLiteral("More..."), false, QColor("#55748E"));
 
             const auto &notes = _preview[t];
             if (notes.isEmpty()) continue;
@@ -250,7 +254,7 @@ protected:
                 const int sx = std::max(x0 + 1, xForMs(n.beginMs));
                 const int ex = std::min(x1 - 1, xForMs(n.endMs));
                 if (ex < x0 || sx >= x1 || ex <= sx) continue;
-                const int ny = y + 42 - ((n.pitch - low) * 31 / range);
+                const int ny = y + 90 - ((n.pitch - low) * 66 / range);
                 p.drawRect(QRect(sx, ny, std::max(1, ex - sx), 3));
             }
         }
@@ -308,7 +312,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *e) override {
         if (_file && e->button() == Qt::LeftButton && e->position().x() < headerWidth &&
             e->position().y() >= rulerHeight &&
-            (int(e->position().y()) - rulerHeight) % laneHeight < 31) {
+            (int(e->position().y()) - rulerHeight) % laneHeight < 47) {
             const int row = (int(e->position().y()) - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
@@ -492,20 +496,26 @@ private:
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     // Hit targets match the painted buttons. Do not overlap the track name.
-    QRect visibilityRect(int y) const { return QRect(12, y + 49, 32, 25); }
-    QRect muteRect(int y) const { return QRect(50, y + 49, 32, 25); }
-    QRect soloRect(int y) const { return QRect(88, y + 49, 32, 25); }
-    QRect renameRect(int y) const { return QRect(126, y + 49, 32, 25); }
-    QRect cloneRect(int y) const { return QRect(164, y + 49, 32, 25); }
-    QRect removeRect(int y) const { return QRect(202, y + 49, 32, 25); }
-    QRect actionsRect(int y) const { return QRect(240, y + 49, 51, 25); }
+    QRect visibilityRect(int y) const { return QRect(13, y + 51, 67, 27); }
+    QRect muteRect(int y) const { return QRect(87, y + 51, 66, 27); }
+    QRect soloRect(int y) const { return QRect(160, y + 51, 67, 27); }
+    QRect renameRect(int y) const { return QRect(13, y + 84, 70, 27); }
+    QRect cloneRect(int y) const { return QRect(90, y + 84, 66, 27); }
+    QRect removeRect(int y) const { return QRect(163, y + 84, 66, 27); }
+    QRect actionsRect(int y) const { return QRect(236, y + 84, 76, 27); }
     static void drawButton(QPainter &p, const QRect &r, const QString &label,
                            bool active, const QColor &accent) {
-        p.setBrush(active ? accent : QColor("#3A404B"));
-        p.setPen(active ? accent : QColor("#5B6573"));
-        p.drawRoundedRect(r, 4, 4);
-        p.setPen(QColor("#F3F6FA"));
+        p.save();
+        p.setRenderHint(QPainter::Antialiasing, true);
+        // Off means available but inactive, NOT disabled. A stronger border,
+        // contrast and text make the buttons readable on dark Windows themes.
+        p.setPen(QPen(active ? accent.lighter(145) : QColor("#62748A"), 1));
+        p.setBrush(active ? accent : QColor("#344252"));
+        p.drawRoundedRect(r, 6, 6);
+        p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+        p.setPen(QColor("#F5F8FC"));
         p.drawText(r, Qt::AlignCenter, label);
+        p.restore();
     }
 };
 
