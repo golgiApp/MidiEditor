@@ -51,6 +51,7 @@
 #include "../midi/MidiOutput.h"
 
 #include <QList>
+#include <QSet>
 #include <QSettings>
 #include <QApplication>
 #include <QDateTime>
@@ -371,8 +372,12 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
             pianoKeys -= (endLineY - 127);
         }
         if (pianoKeys > 0) {
-            pixpainter->fillRect(0, timeHeight, lineNameWidth - 10,
-                                 pianoKeys * lineHeight(), _cachedPianoWhiteKeyColor);
+            // Keyboard gutter stays ivory even when the surrounding editor is dark.
+            // With GM Drum Labels enabled, reserve the rest for the dark label overlay.
+            const int keyGutterWidth = _showGMDrumLabels ? 72 : (lineNameWidth - 10);
+            pixpainter->fillRect(0, timeHeight, keyGutterWidth,
+                                 pianoKeys * lineHeight(),
+                                 _cachedShouldUseDarkMode ? QColor(248, 249, 252) : _cachedPianoWhiteKeyColor);
         }
 
         // draw background of lines, pianokeys and linenames. when i increase ,the tune decrease.
@@ -830,8 +835,8 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
             int textX = label.keyX + (label.keyW - textW) / 2;
             int textY = label.keyY + (label.keyH + fm.ascent() - fm.descent()) / 2;
 
-            if (label.isBlack || _cachedShouldUseDarkMode) {
-                // Black key or Dark Mode white key: white text with full dark outline (embroidered)
+            if (label.isBlack) {
+                // Black keys: white label with dark outline (even in dark UI mode)
                 painter->setPen(QColor(0, 0, 0, 180));
                 painter->drawText(textX - 1, textY - 1, label.keyName);
                 painter->drawText(textX + 1, textY - 1, label.keyName);
@@ -1190,6 +1195,19 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
         bool selected = (mouseY >= y && mouseY < y + height && mouseX > lineNameWidth && mouseOver) ||
                         (!Appearance::accentKeyHighlight() && _cachedSelectedRows.contains(127 - number));
 
+        // XIV MIDI Studio: Keep the physical keyboard white and black even in
+        // dark UI themes. Do not change Appearance::pianoWhiteKeyColor(), as
+        // that is also used by the Piano Roll's timeline/ruler background.
+        // This palette applies ONLY to the drawn keyboard keys.
+        const QColor whiteKey = _cachedShouldUseDarkMode ? QColor(248, 249, 252) : _cachedPianoWhiteKeyColor;
+        const QColor blackKey = _cachedShouldUseDarkMode ? QColor(22, 25, 31) : _cachedPianoBlackKeyColor;
+        const QColor whiteHover = _cachedShouldUseDarkMode ? QColor(224, 236, 250) : _cachedPianoWhiteKeyHoverColor;
+        const QColor blackHover = _cachedShouldUseDarkMode ? QColor(55, 65, 83) : _cachedPianoBlackKeyHoverColor;
+        const QColor whiteSelected = _cachedShouldUseDarkMode ? QColor(190, 215, 243) : _cachedPianoWhiteKeySelectedColor;
+        const QColor blackSelected = _cachedShouldUseDarkMode ? QColor(70, 100, 143) : _cachedPianoBlackKeySelectedColor;
+        const QColor whiteActive = _cachedShouldUseDarkMode ? QColor(116, 195, 246) : _cachedPianoWhiteKeyActiveColor;
+        const QColor blackActive = _cachedShouldUseDarkMode ? QColor(42, 136, 203) : _cachedPianoBlackKeyActiveColor;
+
         QPolygon keyPolygon;
 
         bool inRect = false;
@@ -1201,9 +1219,9 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
             playerRect.setY(y);
             playerRect.setWidth(width * scaleWidthBlack);
             playerRect.setHeight(height * scaleHeightBlack + 0.5);
-            QColor c = _cachedPianoBlackKeyColor;
+            QColor c = blackKey;
             inRect = mouseOver && (mouseX <= lineNameWidth) && (number == _lastHoverPianoKey);
-            painter->fillRect(playerRect, inRect ? _cachedPianoBlackKeyHoverColor : (isActive ? _cachedPianoBlackKeyActiveColor : (selected ? _cachedPianoBlackKeySelectedColor : c)));
+            painter->fillRect(playerRect, inRect ? blackHover : (isActive ? blackActive : (selected ? blackSelected : c)));
 
             keyPolygon.append(QPoint(x, y));
             keyPolygon.append(QPoint(x, y + height * scaleHeightBlack));
@@ -1236,30 +1254,30 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
 
         if (isBlack) {
             if (inRect) {
-                painter->setBrush(_cachedPianoBlackKeyHoverColor);
+                painter->setBrush(blackHover);
             } else if (isActive) {
-                painter->setBrush(_cachedPianoBlackKeyActiveColor);
+                painter->setBrush(blackActive);
             } else if (selected) {
-                painter->setBrush(_cachedPianoBlackKeySelectedColor);
+                painter->setBrush(blackSelected);
             } else {
-                painter->setBrush(_cachedPianoBlackKeyColor);
+                painter->setBrush(blackKey);
             }
         } else {
             if (inRect) {
-                painter->setBrush(_cachedPianoWhiteKeyHoverColor);
+                painter->setBrush(whiteHover);
             } else if (isActive) {
-                painter->setBrush(_cachedPianoWhiteKeyActiveColor);
+                painter->setBrush(whiteActive);
             } else if (selected) {
-                painter->setBrush(_cachedPianoWhiteKeySelectedColor);
+                painter->setBrush(whiteSelected);
             } else {
-                painter->setBrush(_cachedPianoWhiteKeyColor);
+                painter->setBrush(whiteKey);
             }
         }
         painter->setPen(_cachedDarkGrayColor);
         painter->drawPolygon(keyPolygon, Qt::OddEvenFill);
 
         if (name != "") {
-            painter->setPen(Qt::gray); // Original color for both modes
+            painter->setPen(_cachedShouldUseDarkMode ? QColor(62, 68, 78) : Qt::gray); // Readable on white key faces
             QFontMetrics fm(painter->font());
             int textlength = fm.horizontalAdvance(name);
 
@@ -1387,7 +1405,41 @@ MidiFile *MatrixWidget::midiFile() {
     return file;
 }
 
+// XIV MIDI Studio: pitch-key selection always searches the whole focused track,
+// including notes in other regions and outside the displayed time window.
+void MatrixWidget::selectPitchRange(int low, int high) {
+    if (!file || !Selection::instance()) return;
+    low = std::clamp(low, 0, 127);
+    high = std::clamp(high, 0, 127);
+    if (low > high) std::swap(low, high);
+    QList<MidiEvent *> selected = _pitchRangeAdditive ? _pitchRangeExisting : QList<MidiEvent *>();
+    QSet<MidiEvent *> seen(selected.begin(), selected.end());
+    for (int channel = 0; channel < 16; ++channel) {
+        const auto *events = file->channelEvents(channel);
+        if (!events) continue;
+        for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || note->velocity() <= 0 || !note->offEvent()) continue;
+            if (_focusedTrack && note->track() != _focusedTrack) continue;
+            if (note->note() >= low && note->note() <= high && !seen.contains(note)) {
+                selected.append(note);
+                seen.insert(note);
+            }
+        }
+    }
+    Selection::instance()->setSelection(std::move(selected));
+    if (EditorTool::mainWindow() && EditorTool::mainWindow()->eventWidget())
+        EditorTool::mainWindow()->eventWidget()->reportSelectionChangedByTool();
+    update();
+}
+
 void MatrixWidget::mouseMoveEvent(QMouseEvent *event) {
+    if (_pitchRangeDragging) {
+        const int currentPitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
+        selectPitchRange(_pitchRangeAnchor, currentPitch);
+        event->accept();
+        return;
+    }
     PaintWidget::mouseMoveEvent(event);
 
     if (!enabled) {
@@ -1619,6 +1671,22 @@ void MatrixWidget::leaveEvent(QEvent *event) {
 }
 
 void MatrixWidget::mousePressEvent(QMouseEvent *event) {
+    // Left drag on the piano-key gutter selects an inclusive range of pitches.
+    // Alt+left retains the former note-audition shortcut; right click retains
+    // drum-key visual marking and latch operations.
+    if (file && enabled && event->button() == Qt::LeftButton &&
+        mouseInRect(PianoArea) && !(event->modifiers() & Qt::AltModifier)) {
+        const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
+        _pitchRangeDragging = true;
+        _pitchRangeAnchor = pitch;
+        _pitchRangeAdditive = bool(event->modifiers() & Qt::ControlModifier);
+        _pitchRangeExisting = Selection::instance()->selectedEvents();
+        selectPitchRange(pitch, pitch);
+        grabMouse();
+        event->accept();
+        return;
+    }
+
     EditorTool* currentTool = Tool::currentTool();
 
     // Special case for MeasureTool: Right-Click for context menu, Middle-Click for deletion
@@ -1804,6 +1872,15 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
+    if (_pitchRangeDragging && event->button() == Qt::LeftButton) {
+        _pitchRangeDragging = false;
+        const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
+        selectPitchRange(_pitchRangeAnchor, pitch);
+        releaseMouse();
+        event->accept();
+        return;
+    }
+
     if (_pressedPianoNote != -1 && (event->button() == Qt::LeftButton || event->button() == Qt::RightButton)) {
         qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - _pressedPianoTime;
         if (elapsed < 300) { // Slightly longer 300ms preview for a more musical feel

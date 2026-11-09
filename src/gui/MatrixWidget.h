@@ -722,6 +722,12 @@ private:
     MidiFile *file;
     MidiTrack *_focusedTrack = nullptr;
     bool _showGMDrumLabels = false;
+    bool _pitchRangeDragging = false;
+    int _pitchRangeAnchor = -1;
+    bool _pitchRangeAdditive = false;
+    QList<MidiEvent *> _pitchRangeExisting;
+    void selectPitchRange(int low, int high);
+
 
     // === Display Areas ===
 

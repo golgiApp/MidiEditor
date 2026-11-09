@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <Package>
-    <DisplayName>MidiEditor</DisplayName>
-    <Description>MidiEditor is a free software providing an interface to edit, record, and play Midi data. Packed with all necessary dependencies.</Description>
-    <Version>4.5.0</Version>
-    <ReleaseDate>2026-05-03</ReleaseDate>
+    <DisplayName>XIV MIDI Studio</DisplayName>
+    <Description>XIV MIDI Studio is an open-source MIDI arranging editor for FFXIV performers, based on MidiEditor.</Description>
+    <Version>0.3.0-preview</Version>
+    <ReleaseDate>2026-11-09</ReleaseDate>
     <Name>org.midieditor.midieditor</Name>
     <Licenses>
         <License name="License Agreement" file="LICENSE" />

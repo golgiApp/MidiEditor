@@ -1,5 +1,5 @@
 
-local MIDIEDITOR_RELEASE_VERSION_STRING = "4.5.0"
+local MIDIEDITOR_RELEASE_VERSION_STRING = "0.3.0-preview"
 
 -- Override uchardet package to use gitlab source instead of rate-limited freedesktop downloads
 package("uchardet")
@@ -40,7 +40,7 @@ option("fluidsynth_dir", {
     showmenu = true,
 })
 
-target("MidiEditor") do
+target("XIVMidiStudio") do
     set_languages("cxxlatest")
     set_targetdir("bin")
 
@@ -215,6 +215,9 @@ target("MidiEditor") do
         add_installfiles("midieditor.icns")
     end
     
+    if os.isfile("soundfonts/FFXIV Standard.sf2") then
+        add_installfiles("soundfonts/FFXIV Standard.sf2", {prefixdir = "soundfonts"})
+    end
     local installdir = "packaging/org.midieditor.midieditor/data/"
     local bindir = path.join(installdir, "bin")
     local plugindir = path.join(bindir, "plugins")
@@ -243,7 +246,7 @@ end
 target("installer") do
     set_kind("phony")
     set_enabled(is_plat("windows", "linux"))
-    add_deps("MidiEditor")
+    add_deps("XIVMidiStudio")
 
     set_installdir(installdir)
     if is_plat("windows") then

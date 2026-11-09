@@ -203,7 +203,7 @@ int main(int argc, char *argv[]) {
     }
 
     a.setApplicationVersion("4.5.0");
-    a.setApplicationName("MeowMidiEditor");
+    a.setApplicationName("XIV MIDI Studio");
     a.setQuitOnLastWindowClosed(true);
 
     a.setAttribute(Qt::AA_CompressHighFrequencyEvents, true);

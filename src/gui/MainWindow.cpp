@@ -65,6 +65,7 @@
 #include "TrimStartDialog.h"
 #include "InstrumentChooser.h"
 #include "../midi/InstrumentDefinitions.h"
+#include "../support/SoundFontPresetCatalog.h"
 #include "LayoutSettingsWidget.h"
 #include "SplitChannelsDialog.h"
 #include "MatrixWidget.h"
@@ -607,6 +608,70 @@ MainWindow::MainWindow(QString initFile)
     };
     _arrangementWidget->trackMenuRequested = [this](MidiTrack *track, const QPoint &globalPos) {
         if (_trackWidget) _trackWidget->showTrackContextMenu(track, globalPos);
+    };
+    _arrangementWidget->instrumentMenuRequested = [this](MidiTrack *track, const QPoint &globalPos) {
+        if (!file || !track || !file->tracks()->contains(track)) return;
+        QStringList paths;
+#ifdef FLUIDSYNTH_SUPPORT
+        for (const auto &item : FluidSynthEngine::instance()->soundFontCollection())
+            if (item.second && QFileInfo::exists(item.first)) paths.append(item.first);
+#endif
+        const QString bundled = QCoreApplication::applicationDirPath()
+            + QStringLiteral("/soundfonts/FFXIV Standard.sf2");
+        if (paths.isEmpty() && QFileInfo::exists(bundled)) paths.append(bundled);
+        QMenu menu(this);
+        int activeChannel = track->assignedChannel();
+        if (activeChannel < 0 || activeChannel > 15) {
+            QMessageBox::warning(this, tr("No MIDI channel"),
+                tr("Assign this track a MIDI channel before changing its instrument."));
+            return;
+        }
+        // MIDI programs belong to channels; warn if this channel is shared.
+        for (MidiTrack *other : *file->tracks()) {
+            if (other != track && other->assignedChannel() == activeChannel) {
+                menu.addAction(tr("Shared channel: changing this instrument also changes %1")
+                    .arg(other->name()))->setEnabled(false);
+                menu.addSeparator();
+                break;
+            }
+        }
+        for (const QString &path : paths) {
+            const auto presets = xivReadSoundFontPresets(path);
+            if (presets.isEmpty()) continue;
+            QMenu *fontMenu = menu.addMenu(QFileInfo(path).completeBaseName());
+            for (const auto &preset : presets) {
+                // Bank 0 is preserved by a regular program-change MIDI event.
+                // Additional SF2 banks need bank-select events and are omitted here.
+                if (preset.bank != 0) continue;
+                QAction *action = fontMenu->addAction(preset.name);
+                QObject::connect(action, &QAction::triggered, this,
+                    [this, track, activeChannel, preset]() {
+                        if (!file || !file->tracks()->contains(track)) return;
+                        file->protocol()->startNewAction(tr("Change Track Instrument"));
+                        ProgChangeEvent *atZero = nullptr;
+                        const auto *events = file->channel(activeChannel)->eventMap();
+                        for (auto it = events->cbegin(); it != events->cend(); ++it) {
+                            auto *pc = dynamic_cast<ProgChangeEvent *>(it.value());
+                            if (pc && pc->midiTime() == 0 && pc->track() == track) {
+                                atZero = pc; break;
+                            }
+                        }
+                        if (atZero) atZero->setProgram(preset.program);
+                        else file->channel(activeChannel)->insertEvent(
+                            new ProgChangeEvent(activeChannel, preset.program, track), 0);
+                        track->setName(preset.name);
+                        file->protocol()->endAction();
+                        MidiOutput::sendProgram(activeChannel, preset.program);
+                        if (_arrangementWidget) _arrangementWidget->rebuildPreview();
+                        if (_pianoRollTrackLabel &&
+                            NewNoteTool::editTrack() == track->number())
+                            _pianoRollTrackLabel->setText(preset.name);
+                    });
+            }
+        }
+        if (menu.actions().isEmpty())
+            menu.addAction(tr("No enabled SoundFont presets found"))->setEnabled(false);
+        menu.exec(globalPos);
     };
     _arrangementWidget->renameTrackRequested = [this](MidiTrack *track) {
         if (track && file && file->tracks()->contains(track)) renameTrack(track->number());
@@ -5841,7 +5906,7 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     _actionMap["panic"] = panicAction;
 
     // Help
-    QAction *aboutAction = new QAction(tr("About MidiEditor"), this);
+    QAction *aboutAction = new QAction(tr("About XIV MIDI Studio"), this);
     connect(aboutAction, SIGNAL(triggered()), this, SLOT(about()));
     helpMB->addAction(aboutAction);
 

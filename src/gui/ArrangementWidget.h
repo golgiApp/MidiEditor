@@ -43,6 +43,7 @@ public:
     }
 
     std::function<void(MidiTrack *)> selectTrackRequested;
+    std::function<void(MidiTrack *, const QPoint &)> instrumentMenuRequested;
     std::function<void(MidiTrack *, const QPoint &)> trackMenuRequested;
     std::function<void(MidiTrack *)> renameTrackRequested;
     std::function<void(MidiTrack *)> cloneTrackRequested;
@@ -60,7 +61,7 @@ public:
     static constexpr int headerWidth = 326;
     static constexpr int rulerHeight = 34;
     // Two rows of large, readable named actions rather than tiny single letters.
-    static constexpr int laneHeight = 116;
+    static constexpr int laneHeight = 145;
 
     void setFile(MidiFile *file) {
         _file = file;
@@ -218,6 +219,8 @@ protected:
             p.drawText(14, y + 44, QStringLiteral("Track %1   |   Channel %2")
                        .arg(i + 1).arg(t->assignedChannel() + 1));
 
+            drawButton(p, instrumentRect(y), QStringLiteral("Instrument  \u25be"), false, QColor("#45647F"));
+
             // Accessible labels rather than ambiguous V/M/S/R/C buttons.
             // The second row contains all destructive/management actions.
             drawButton(p, visibilityRect(y), QStringLiteral("Show"), !t->hidden(), QColor("#1767A4"));
@@ -334,7 +337,11 @@ protected:
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
-                if (visibilityRect(rulerHeight + row * laneHeight).contains(pos)) {
+                if (instrumentRect(rulerHeight + row * laneHeight).contains(pos)) {
+                    setSelectedTrack(track);
+                    if (selectTrackRequested) selectTrackRequested(track);
+                    if (instrumentMenuRequested) instrumentMenuRequested(track, mapToGlobal(pos));
+                } else if (visibilityRect(rulerHeight + row * laneHeight).contains(pos)) {
                     _file->protocol()->startNewAction(track->hidden() ? tr("Show Track") : tr("Hide Track"));
                     track->setHidden(!track->hidden());
                     _file->protocol()->endAction();
@@ -408,7 +415,8 @@ protected:
             if (row >= 0 && row < _file->tracks()->size()) {
                 const int top = rulerHeight + row * laneHeight;
                 QString tooltip;
-                if (visibilityRect(top).contains(pos)) tooltip = tr("Show / hide track notes in Piano Roll");
+                if (instrumentRect(top).contains(pos)) tooltip = tr("Choose a loaded SoundFont instrument and automatically rename this track");
+                else if (visibilityRect(top).contains(pos)) tooltip = tr("Show / hide track notes in Piano Roll");
                 else if (muteRect(top).contains(pos)) tooltip = tr("Mute / unmute track during playback");
                 else if (soloRect(top).contains(pos)) tooltip = tr("Solo track during playback");
                 else if (renameRect(top).contains(pos)) tooltip = tr("Rename track");
@@ -496,13 +504,14 @@ private:
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     // Hit targets match the painted buttons. Do not overlap the track name.
-    QRect visibilityRect(int y) const { return QRect(13, y + 51, 67, 27); }
-    QRect muteRect(int y) const { return QRect(87, y + 51, 66, 27); }
-    QRect soloRect(int y) const { return QRect(160, y + 51, 67, 27); }
-    QRect renameRect(int y) const { return QRect(13, y + 84, 70, 27); }
-    QRect cloneRect(int y) const { return QRect(90, y + 84, 66, 27); }
-    QRect removeRect(int y) const { return QRect(163, y + 84, 66, 27); }
-    QRect actionsRect(int y) const { return QRect(236, y + 84, 76, 27); }
+    QRect instrumentRect(int y) const { return QRect(13, y + 49, 299, 27); }
+    QRect visibilityRect(int y) const { return QRect(13, y + 80, 67, 27); }
+    QRect muteRect(int y) const { return QRect(87, y + 80, 66, 27); }
+    QRect soloRect(int y) const { return QRect(160, y + 80, 67, 27); }
+    QRect renameRect(int y) const { return QRect(13, y + 113, 70, 27); }
+    QRect cloneRect(int y) const { return QRect(90, y + 113, 66, 27); }
+    QRect removeRect(int y) const { return QRect(163, y + 113, 66, 27); }
+    QRect actionsRect(int y) const { return QRect(236, y + 113, 76, 27); }
     static void drawButton(QPainter &p, const QRect &r, const QString &label,
                            bool active, const QColor &accent) {
         p.save();

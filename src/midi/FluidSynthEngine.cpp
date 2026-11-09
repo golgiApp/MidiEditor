@@ -1146,6 +1146,16 @@ void FluidSynthEngine::loadSettings(QSettings *settings) {
 
     settings->endGroup();
 
+    // XIV MIDI Studio portable installed default: only adopt when the user has
+    // not configured any SoundFonts. Never overwrite a customized collection.
+    if (collection.isEmpty()) {
+        const QString bundled = QCoreApplication::applicationDirPath()
+            + QStringLiteral("/soundfonts/FFXIV Standard.sf2");
+        if (QFileInfo::exists(bundled)) {
+            collection.append(qMakePair(QFileInfo(bundled).absoluteFilePath(), true));
+        }
+    }
+
     // Store paths directly
     _collection = collection;
 

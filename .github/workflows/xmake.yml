@@ -1,7 +1,7 @@
 name: build with xmake on windows
 on:
   push:
-    branches: [ main ]
+    branches: [ main, v0.3-development ]
     paths-ignore:
       - '.github/workflows/deploy-pages.yml'
       - 'README.md'
@@ -253,12 +253,18 @@ jobs:
         run: |
           $data = "./packaging/org.midieditor.midieditor/data"
           mkdir $data
-          cp ./bin/MidiEditor.exe $data/
-          windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-compiler-runtime --skip-plugin-types qmltooling,sqldrivers,positioning,sensors,serialport,texttospeech,webengine --plugindir $data/plugins $data/MidiEditor.exe
+          cp ./bin/XIVMidiStudio.exe $data/
+          windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-compiler-runtime --skip-plugin-types qmltooling,sqldrivers,positioning,sensors,serialport,texttospeech,webengine --plugindir $data/plugins $data/XIVMidiStudio.exe
           Remove-Item -Path ./fluidsynth/bin/vcruntime*.dll -ErrorAction SilentlyContinue
           Remove-Item -Path ./fluidsynth/bin/msvcp*.dll -ErrorAction SilentlyContinue
           Remove-Item -Path ./fluidsynth/bin/concrt*.dll -ErrorAction SilentlyContinue
           cp ./fluidsynth/bin/*.dll $data/
+          New-Item -ItemType Directory -Force -Path "$data/soundfonts" | Out-Null
+          if (Test-Path "./soundfonts/FFXIV Standard.sf2") {
+            Copy-Item "./soundfonts/FFXIV Standard.sf2" "$data/soundfonts/FFXIV Standard.sf2"
+          } else {
+            Write-Host "No bundled SF2 found; building installer without a default SoundFont."
+          }
           mkdir ./packaging/org.midieditor.manual/data/
           cp -Recurse -Path ./manual/ -Destination ./packaging/org.midieditor.manual/data/
 
@@ -271,5 +277,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: midieditor-xmake-${{ matrix.qt_arch }}
+          name: XIV-MIDI-Studio-v0.3-preview-${{ matrix.qt_arch }}
           path: Install.exe
