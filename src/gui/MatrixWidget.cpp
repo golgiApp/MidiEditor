@@ -929,6 +929,9 @@ void MatrixWidget::paintChannel(QPainter *painter, int channel) {
 
     for (; it != end; ++it) {
         MidiEvent *currentEvent = it.value();
+        if (_focusedTrack && currentEvent->track() != _focusedTrack) {
+            continue; // Only the selected instrument is shown and hit-testable.
+        }
 
         // Fast early rejection: check line visibility first (cheapest test)
         int line = currentEvent->line();
@@ -2200,6 +2203,7 @@ int MatrixWidget::timeMsOfWidth(int w) {
 }
 
 bool MatrixWidget::eventInWidget(MidiEvent *event) {
+    if (_focusedTrack && (!event || event->track() != _focusedTrack)) return false;
     NoteOnEvent *on = dynamic_cast<NoteOnEvent *>(event);
     OffEvent *off = dynamic_cast<OffEvent *>(event);
     if (on) {

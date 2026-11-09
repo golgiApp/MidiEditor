@@ -1524,9 +1524,9 @@ void MidiFile::preparePlayerData(int tickFrom) {
             if (tick >= tickFrom) {
                 // all Events after cursorTick are added
                 int ms = msOfTick(tick);
-                if (!event->track()->muted()) {
-                    playerMap->insert(ms, event);
-                }
+                // Keep all tracks in the playback schedule.  The player checks
+                // mute/solo live so tracks can be unmuted during playback.
+                playerMap->insert(ms, event);
             } else {
                 ProgChangeEvent *prg = dynamic_cast<ProgChangeEvent *>(event);
                 if (prg) {

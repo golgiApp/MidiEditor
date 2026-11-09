@@ -28,6 +28,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QClipboard>
 #include <QSettings>
 #include <QSplitter>
 #include <QTabWidget>
@@ -66,6 +67,9 @@
 #include "LayoutSettingsWidget.h"
 #include "SplitChannelsDialog.h"
 #include "MatrixWidget.h"
+#include "ArrangementWidget.h"
+#include "../midi/PlayerThread.h"
+#include <QScrollArea>
 #include "GameSupportSettingsWidget.h"
 #include "FFXIVFixerDialog.h"
 #include "../support/FFXIVChannelFixer.h"
@@ -149,6 +153,7 @@ MainWindow::MainWindow(QString initFile)
       , _initFile(initFile) {
     file = 0;
     _settings = Appearance::settings(this);
+    _showAllTracksInPianoRoll = _settings->value("ffxiv/piano_roll_show_all_tracks", false).toBool();
 
     _moveSelectedEventsToChannelMenu = 0;
     _moveSelectedEventsToTrackMenu = 0;
@@ -483,10 +488,38 @@ MainWindow::MainWindow(QString initFile)
     _miscControlLayout->addWidget(btnHand, 9, 1, 1, 1);
     _miscControlLayout->addWidget(btnLine, 9, 2, 1, 1);
 
+    // Logic-inspired track arrangement above the editable Piano Roll.
+    // This is a separate display: MIDI events are still owned by MidiFile.
+    QScrollArea *arrangementArea = new QScrollArea(leftSplitter);
+    arrangementArea->setObjectName(QStringLiteral("ffxivArrangementScrollArea"));
+    arrangementArea->setWidgetResizable(true);
+    arrangementArea->setFrameShape(QFrame::NoFrame);
+    arrangementArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    arrangementArea->setStyleSheet(QStringLiteral(
+        "QScrollArea#ffxivArrangementScrollArea { background: #202329; border: none; }"));
+    _arrangementWidget = new ArrangementWidget(arrangementArea);
+    arrangementArea->setWidget(_arrangementWidget);
+    leftSplitter->insertWidget(0, arrangementArea);
+    _arrangementWidget->selectTrackRequested = [this](MidiTrack *track) {
+        editTrackAndChannel(track);
+    };
+    _arrangementWidget->scrollTimeRequested = [this](int ms) {
+        if (hori) hori->setValue(ms);
+    };
+    connect(hori, &QScrollBar::valueChanged, _arrangementWidget,
+            &ArrangementWidget::setOriginMs);
+    connect(MidiPlayer::playerThread(), &PlayerThread::timeMsChanged,
+            _arrangementWidget, &ArrangementWidget::setPlayheadMs,
+            Qt::QueuedConnection);
+    arrangementArea->setMinimumHeight(105);
+    // The arrangement can be resized independently from the Piano Roll.
+    leftSplitter->setStretchFactor(0, 3);  // arrangement
+    leftSplitter->setStretchFactor(1, 8);  // piano roll
+    leftSplitter->setStretchFactor(2, 1);  // velocity editor
+    leftSplitter->setStretchFactor(3, 0);  // horizontal scrollbar
+    leftSplitter->setSizes({280, 530, 115, 20});
+
     // Set the sizes of leftSplitter
-    leftSplitter->setStretchFactor(0, 8);  // matrixArea
-    leftSplitter->setStretchFactor(1, 1);  // velocityArea
-    leftSplitter->setStretchFactor(2, 0);  // scrollBarArea (fixed height, non-resizable)
 
     // Track
     tracksWidget = new QWidget(upperTabWidget);
@@ -713,6 +746,9 @@ MainWindow::MainWindow(QString initFile)
 
     // Initialize shared clipboard immediately
     initializeSharedClipboard();
+    connect(QApplication::clipboard(), &QClipboard::dataChanged, this,
+            &MainWindow::copiedEventsChanged);
+    copiedEventsChanged();
 
     // Apply widget size constraints based on settings
     applyWidgetSizeConstraints();
@@ -821,7 +857,7 @@ void MainWindow::updatePasteActionState() {
     // Simple check - enable paste if shared clipboard is available
     if (_pasteAction && EventTool::copiedEvents->size() == 0) {
         SharedClipboard *clipboard = SharedClipboard::instance();
-        bool sharedClipboardAvailable = clipboard->initialize();
+        bool sharedClipboardAvailable = clipboard->hasData();
         _pasteAction->setEnabled(sharedClipboardAvailable);
     }
 }
@@ -871,6 +907,7 @@ void MainWindow::setFile(MidiFile *newFile) {
     protocolWidget->setFile(newFile);
     channelWidget->setFile(newFile);
     _trackWidget->setFile(newFile);
+    if (_arrangementWidget) _arrangementWidget->setFile(newFile);
     eventWidget()->setFile(newFile);
 
     Tool::setFile(newFile);
@@ -887,6 +924,8 @@ void MainWindow::setFile(MidiFile *newFile) {
     connect(newFile->protocol(), SIGNAL(actionFinished()), this, SLOT(updateChannelMenu()));
     connect(newFile->protocol(), SIGNAL(actionFinished()), this, SLOT(checkEnableActionsForSelection()));
     connect(newFile->protocol(), SIGNAL(actionFinished()), this, SLOT(updateStatusBar()));
+    // Drop the previous Piano Roll's track focus before switching files.
+    mw_matrixWidget->setFocusedTrack(nullptr);
     // Set file on the appropriate widget based on rendering mode
     if (OpenGLMatrixWidget *openglMatrix = qobject_cast<OpenGLMatrixWidget*>(_matrixWidgetContainer)) {
         // Using OpenGL acceleration - set file on OpenGL widget (which delegates to internal widget)
@@ -897,6 +936,10 @@ void MainWindow::setFile(MidiFile *newFile) {
     }
     updateChannelMenu();
     updateTrackMenu();
+    if (newFile && newFile->numTracks() > 0) {
+        const int focusIndex = std::min(1, newFile->numTracks() - 1);
+        editTrack(focusIndex, false);
+    }
     _matrixWidgetContainer->update();
     _miscWidgetContainer->update();
 
@@ -2668,7 +2711,8 @@ void MainWindow::selectAll() {
         const QMultiMap<int, MidiEvent *> *eventMap = file->channel(i)->eventMap();
         foreach(MidiEvent* event, eventMap->values()) {
             // Pre-filter events to avoid redundant checks later
-            if (event->track()->hidden()) {
+            if (event->track()->hidden() ||
+                (mw_matrixWidget->focusedTrack() && event->track() != mw_matrixWidget->focusedTrack())) {
                 continue;
             }
 
@@ -3811,6 +3855,14 @@ void MainWindow::editChannel(int i, bool assign) {
 
 void MainWindow::editTrack(int i, bool assign) {
     NewNoteTool::setEditTrack(i);
+    // The selected arrangement track is the only one editable in the Piano Roll.
+    MidiTrack *focused = (file && i >= 0 && i < file->numTracks()) ? file->track(i) : nullptr;
+    if (mw_matrixWidget && mw_matrixWidget->focusedTrack() != focused) {
+        EventTool::clearSelection(); // Prevent edits to notes hidden by the new track focus.
+    }
+    if (_arrangementWidget) _arrangementWidget->setSelectedTrack(focused);
+    if (mw_matrixWidget) mw_matrixWidget->setFocusedTrack(_showAllTracksInPianoRoll ? nullptr : focused);
+    if (_matrixWidgetContainer) _matrixWidgetContainer->update();
 
     // assign channel to track
     if (assign && file && file->track(i)) {
@@ -3824,6 +3876,9 @@ void MainWindow::editTrackAndChannel(MidiTrack *track) {
 
     int targetTrackNum = track->number();
     editTrack(targetTrackNum, false);
+    // Updating the playback program in editChannel() during playback could
+    // change the sound of another instrument sharing that MIDI channel.
+    if (MidiPlayer::isPlaying()) return;
 
     int cursorTick = file->cursorTick();
     int bestTick = -1;
@@ -5007,6 +5062,24 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     viewMB->addAction(resetViewAction);
     _actionMap["reset_view"] = resetViewAction;
 
+    // Restores MidiEditor's original stacked Piano Roll without hiding the
+    // arrangement tracks or changing the MIDI file itself.
+    _showAllTracksInPianoRollAction = new QAction(tr("Show All Tracks in Piano Roll"), this);
+    _showAllTracksInPianoRollAction->setCheckable(true);
+    _showAllTracksInPianoRollAction->setChecked(_showAllTracksInPianoRoll);
+    _showAllTracksInPianoRollAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_G));
+    _showAllTracksInPianoRollAction->setToolTip(tr("Toggle selected-track and stacked multi-track Piano Roll"));
+    connect(_showAllTracksInPianoRollAction, &QAction::toggled, this, [this](bool showAll) {
+        _showAllTracksInPianoRoll = showAll;
+        _settings->setValue("ffxiv/piano_roll_show_all_tracks", showAll);
+        if (!mw_matrixWidget) return;
+        EventTool::clearSelection();
+        MidiTrack *selected = file ? file->track(NewNoteTool::editTrack()) : nullptr;
+        mw_matrixWidget->setFocusedTrack(showAll ? nullptr : selected);
+        if (_matrixWidgetContainer) _matrixWidgetContainer->update();
+        if (_miscWidgetContainer) _miscWidgetContainer->update();
+    });
+    viewMB->addAction(_showAllTracksInPianoRollAction);
     viewMB->addSeparator();
 
     viewMB->addAction(_allTracksVisible);
@@ -6659,7 +6732,7 @@ void MainWindow::copiedEventsChanged() {
     // If shared clipboard is available, always enable paste
     // The paste operation itself will handle whether there's data or not
     SharedClipboard *clipboard = SharedClipboard::instance();
-    bool sharedClipboardAvailable = clipboard->initialize();
+    bool sharedClipboardAvailable = clipboard->hasData();
 
     bool enable = EventTool::copiedEvents->size() > 0 || sharedClipboardAvailable;
 
@@ -6677,6 +6750,7 @@ void MainWindow::updateAll() {
     // Update all widgets and labels
     channelWidget->update();
     _trackWidget->update();
+    if (_arrangementWidget) _arrangementWidget->update();
     _miscWidgetContainer->update();
     updateChannelMenu();
     updateTrackMenu();

@@ -42,6 +42,7 @@
 #include <set>
 #include <vector>
 #include <cmath>
+#include <limits>
 
 QList<MidiEvent *> *EventTool::copiedEvents = new QList<MidiEvent *>;
 
@@ -522,239 +523,60 @@ bool EventTool::copyToSharedClipboard() {
 }
 
 bool EventTool::pasteFromSharedClipboard() {
+    MidiFile *destination = currentFile();
+    if (!destination) return false;
     SharedClipboard *clipboard = SharedClipboard::instance();
-    if (!clipboard->initialize()) {
+    if (!clipboard->initialize() || !clipboard->hasDataFromDifferentProcess()) return false;
+
+    QList<MidiEvent *> events;
+    if (!clipboard->pasteEvents(destination, events, true, destination->cursorTick()) || events.isEmpty())
+        return false;
+
+    int targetIndex = (pasteTrack() >= 0) ? pasteTrack() : NewNoteTool::editTrack();
+    MidiTrack *track = targetIndex >= 0 && targetIndex < destination->numTracks()
+                       ? destination->track(targetIndex) : nullptr;
+    if (!track) track = destination->numTracks() > 0 ? destination->track(0) : nullptr;
+    if (!track) {
+        qDeleteAll(events);
         return false;
     }
+    int firstTick = std::numeric_limits<int>::max();
+    for (MidiEvent *event : events) firstTick = std::min(firstTick, event->midiTime());
+    const int delta = destination->cursorTick() - firstTick;
 
-    // Only paste from shared clipboard if data is from a different process
-    if (!clipboard->hasDataFromDifferentProcess()) {
-        return false;
+    auto destinationChannel = [](MidiEvent *event) {
+        const int ch = destinationChannel(event);
+        return ch >= 0 && ch < 16 ? ch : 0;
+    };
+    std::set<int> affectedChannels;
+    for (MidiEvent *event : events) affectedChannels.insert(destinationChannel(event));
+    // Snapshot each channel once so the entire paste is one undoable action.
+    std::vector<std::pair<ProtocolEntry *, ProtocolEntry *> > channelSnapshots;
+    destination->protocol()->startNewAction(QObject::tr("Paste %1 MIDI Events from Another Window")
+                                            .arg(events.size()));
+    for (int channel : affectedChannels) {
+        MidiChannel *target = destination->channel(channel);
+        channelSnapshots.emplace_back(target->copy(), target);
     }
-
-    QList<MidiEvent *> sharedEvents;
-    if (!clipboard->pasteEvents(currentFile(), sharedEvents, true, currentFile()->cursorTick())) {
-        return false;
+    clearSelection();
+    std::stable_sort(events.begin(), events.end(), [](MidiEvent *a, MidiEvent *b) {
+        return a->midiTime() < b->midiTime();
+    });
+    for (MidiEvent *event : events) {
+        const int ch = destinationChannel(event);
+        const qint64 shifted = qint64(event->midiTime()) + qint64(delta);
+        const int newTick = int(std::clamp<qint64>(shifted, 0,
+                                                   std::numeric_limits<int>::max()));
+        event->setFile(destination);
+        event->setTrack(track, false);
+        event->setChannel(ch, false);
+        destination->channel(ch)->insertEvent(event, newTick, false);
+        if (!dynamic_cast<OffEvent *>(event)) selectEvent(event, false, true, false);
     }
-
-    if (sharedEvents.isEmpty()) {
-        return false;
-    }
-
-    // Now actually paste these events using the same logic as regular paste
-    if (sharedEvents.count() > 0) {
-        // Begin a new ProtocolAction
-        currentFile()->protocol()->startNewAction(QObject::tr("Paste ") + QString::number(sharedEvents.count()) + QObject::tr(" Events from Shared Clipboard"));
-
-        // Get first tick using the original timing information (not deserialized timing)
-        int firstTick = -1;
-        for (int i = 0; i < sharedEvents.size(); i++) {
-            QPair<int, int> originalTiming = SharedClipboard::getOriginalTiming(i);
-            int originalTime = originalTiming.first;
-
-            if (originalTime != -1) {
-                if (originalTime < firstTick || firstTick < 0) {
-                    firstTick = originalTime;
-                }
-            }
-        }
-
-        if (firstTick < 0)
-            firstTick = 0;
-
-        // Calculate the difference to paste at cursor position
-        int diff = currentFile()->cursorTick() - firstTick;
-
-        // Get current editing context (where to paste)
-        int targetChannel = NewNoteTool::editChannel();
-        MidiTrack *targetTrack = currentFile()->track(NewNoteTool::editTrack());
-        if (!targetTrack) {
-            targetTrack = currentFile()->track(0);
-        }
-
-        if (!targetTrack) {
-            // Clean up events
-            for (MidiEvent *event: sharedEvents) {
-                if (event) delete event;
-            }
-            return false;
-        }
-
-        if (!currentFile()) {
-            // Clean up events
-            for (MidiEvent *event: sharedEvents) {
-                if (event) delete event;
-            }
-            return false;
-        }
-
-        // Clear selection and paste events
-        clearSelection();
-
-        // Separate tempo/time signature events from regular events first
-        QList<MidiEvent *> tempoEvents;
-        QList<MidiEvent *> regularEvents;
-        
-        for (MidiEvent *event : sharedEvents) {
-            if (dynamic_cast<TempoChangeEvent *>(event) || dynamic_cast<TimeSignatureEvent *>(event) || dynamic_cast<KeySignatureEvent *>(event)) {
-                tempoEvents.append(event);
-            } else {
-                regularEvents.append(event);
-            }
-        }
-
-        // Create protocol entries for channels that will be modified
-        std::vector<std::pair<ProtocolEntry *, ProtocolEntry *> > channelCopies;
-        std::set<int> copiedChannels;
-
-        // Add target channel for regular events
-        if (!regularEvents.isEmpty()) {
-            if (copiedChannels.find(targetChannel) == copiedChannels.end()) {
-                MidiChannel *channel = currentFile()->channel(targetChannel);
-                ProtocolEntry *channelCopy = channel->copy();
-                channelCopies.push_back(std::make_pair(channelCopy, channel));
-                copiedChannels.insert(targetChannel);
-            }
-        }
-
-        // Add channels 16, 17, and 18 for meta events
-        if (!tempoEvents.isEmpty()) {
-            // Channel 16 for key signature and other general events
-            if (copiedChannels.find(16) == copiedChannels.end()) {
-                MidiChannel *channel = currentFile()->channel(16);
-                ProtocolEntry *channelCopy = channel->copy();
-                channelCopies.push_back(std::make_pair(channelCopy, channel));
-                copiedChannels.insert(16);
-            }
-            // Channel 17 for tempo events
-            if (copiedChannels.find(17) == copiedChannels.end()) {
-                MidiChannel *channel = currentFile()->channel(17);
-                ProtocolEntry *channelCopy = channel->copy();
-                channelCopies.push_back(std::make_pair(channelCopy, channel));
-                copiedChannels.insert(17);
-            }
-            // Channel 18 for time signature events
-            if (copiedChannels.find(18) == copiedChannels.end()) {
-                MidiChannel *channel = currentFile()->channel(18);
-                ProtocolEntry *channelCopy = channel->copy();
-                channelCopies.push_back(std::make_pair(channelCopy, channel));
-                copiedChannels.insert(18);
-            }
-        }
-
-        // First, paste tempo/time signature events and integrate them into the file
-        int tempoEventIndex = 0;
-        for (MidiEvent *event : tempoEvents) {
-            if (!event) {
-                tempoEventIndex++;
-                continue;
-            }
-
-            try {
-                // Get the original timing information
-                QPair<int, int> originalTiming = SharedClipboard::getOriginalTiming(tempoEventIndex);
-                int originalTime = originalTiming.first;
-
-                if (originalTime == -1) {
-                    originalTime = event->midiTime();
-                }
-
-                // Calculate new timing
-                int newTime = originalTime + diff;
-                if (newTime < 0) newTime = 0;
-
-                // Set event properties
-                event->setFile(currentFile());
-                event->setTrack(targetTrack, false);
-
-                // Insert meta events into their correct channels
-                TempoChangeEvent *tempoEvent = dynamic_cast<TempoChangeEvent *>(event);
-                TimeSignatureEvent *timeSigEvent = dynamic_cast<TimeSignatureEvent *>(event);
-                KeySignatureEvent *keySigEvent = dynamic_cast<KeySignatureEvent *>(event);
-                
-                if (tempoEvent) {
-                    event->setChannel(17, false);
-                    currentFile()->channel(17)->insertEvent(event, newTime, false);
-                } else if (timeSigEvent) {
-                    event->setChannel(18, false);
-                    currentFile()->channel(18)->insertEvent(event, newTime, false);
-                } else if (keySigEvent) {
-                    event->setChannel(16, false);
-                    currentFile()->channel(16)->insertEvent(event, newTime, false);
-                } else {
-                    // Fallback for other meta events - use General Events channel
-                    event->setChannel(16, false);
-                    currentFile()->channel(16)->insertEvent(event, newTime, false);
-                }
-
-                selectEvent(event, false, true, false);
-            } catch (...) {
-                delete event;
-            }
-
-            tempoEventIndex++;
-        }
-
-        // Then paste regular events
-        int regularEventIndex = tempoEvents.size(); // Offset by tempo events
-        for (MidiEvent *event : regularEvents) {
-            if (!event) {
-                regularEventIndex++;
-                continue;
-            }
-
-            try {
-                // Get the original timing information from SharedClipboard
-                QPair<int, int> originalTiming = SharedClipboard::getOriginalTiming(regularEventIndex);
-                int originalTime = originalTiming.first;
-
-                if (originalTime == -1) {
-                    // Fallback to event's current timing if no stored timing
-                    originalTime = event->midiTime();
-                }
-
-                // Calculate new timing (preserve relative timing, paste at cursor)
-                int newTime = originalTime + diff;
-
-                // Set the event properties safely (timing is already restored in deserializeEvents)
-                event->setFile(currentFile());
-
-                event->setChannel(targetChannel, false);
-
-                event->setTrack(targetTrack, false);
-
-                // Insert into the target channel at the calculated time
-                currentFile()->channel(targetChannel)->insertEvent(event, newTime, false);
-
-                selectEvent(event, false, true, false);
-            } catch (...) {
-                delete event;
-            }
-
-            regularEventIndex++;
-        }
-
-        // Put the copied channels from before the event insertion onto the protocol stack
-        for (auto channelPair: channelCopies) {
-            ProtocolEntry *channel = channelPair.first;
-            channel->protocol(channel, channelPair.second);
-        }
-
-        // If tempo/time signature events were pasted, recalculate existing notes
-        // This must happen AFTER protocol entries are committed so recalculation is included in undo
-        if (!tempoEvents.isEmpty()) {
-            // Force the MIDI file to recalculate its tempo map
-            currentFile()->calcMaxTime();
-            recalculateExistingNotesAfterTempoChange(tempoEvents);
-        }
-
-        // Update the selection to show the pasted events
-        Selection::instance()->setSelection(Selection::instance()->selectedEvents());
-
-        currentFile()->protocol()->endAction();
-    }
-
-    // Note: sharedEvents are now owned by the file/channels
+    Selection::instance()->setSelection(Selection::instance()->selectedEvents());
+    for (const auto &snapshot : channelSnapshots)
+        snapshot.first->protocol(snapshot.first, snapshot.second);
+    destination->protocol()->endAction();
     return true;
 }
 

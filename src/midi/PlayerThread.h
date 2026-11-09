@@ -23,10 +23,12 @@
 #include <QThread>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QHash>
 
 // Forward declarations
 class MidiFile;
 class MidiEvent;
+class MidiTrack;
 
 /**
  * \class PlayerThread
@@ -142,6 +144,11 @@ signals:
     void measureUpdate(int measure, int tickInMeasure);
 
 private:
+    // key = (channel << 8) | MIDI pitch; count allows repeated note-ons.
+    QHash<MidiTrack *, QHash<int, int>> activeTrackNotes;
+    void silenceMutedTracks();
+    void sendTrackEvent(MidiEvent *event);
+
     /** \brief The MIDI file being played */
     MidiFile *file;
 

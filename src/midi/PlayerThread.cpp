@@ -30,6 +30,7 @@
 #include "MidiTrack.h"
 #include <QMultiMap>
 #include <QElapsedTimer>
+#include <QByteArray>
 
 #define INTERVAL_TIME 15
 #define TIMEOUTS_PER_SIGNAL 1
@@ -55,6 +56,7 @@ void PlayerThread::setInterval(int i) {
 }
 
 void PlayerThread::run() {
+    activeTrackNotes.clear();
     if (!timer) {
         timer = new QTimer();
     }
@@ -82,6 +84,7 @@ void PlayerThread::run() {
         MidiOutput::sendCommand(array);
     }
     MidiOutput::playedNotes.clear();
+    activeTrackNotes.clear();
 
     // Initialize program tracking for track-based compatibility mode
     for (int i = 0; i < 16; i++) {
@@ -100,7 +103,11 @@ void PlayerThread::run() {
             currentChannelProgram[p->channel()] = p->program();
         }
         
-        MidiOutput::sendCommand(it.value());
+        // Program/controller state initialization is still sent as before.
+        // Never trigger a muted track's note-on when seeking.
+        if (!dynamic_cast<NoteOnEvent *>(it.value())) {
+            MidiOutput::sendCommand(it.value());
+        }
         it++;
     }
 
@@ -121,6 +128,65 @@ void PlayerThread::run() {
         timer->stop();
         emit playerStopped();
     }
+}
+
+void PlayerThread::silenceMutedTracks() {
+    MidiTrack *solo = file ? file->soloTrack() : nullptr;
+    for (auto it = activeTrackNotes.begin(); it != activeTrackNotes.end(); ++it) {
+        MidiTrack *track = it.key();
+        if (!track || (!track->muted() && (!solo || track == solo))) continue;
+        auto &notes = it.value();
+        for (auto note = notes.constBegin(); note != notes.constEnd(); ++note) {
+            const int channel = (note.key() >> 8) & 0x0f;
+            const int pitch = note.key() & 0x7f;
+            for (int n = 0; n < note.value(); ++n) {
+                QByteArray msg;
+                msg.append(char(0x80 | channel));
+                msg.append(char(pitch));
+                msg.append(char(0));
+                MidiOutput::sendCommand(msg);
+            }
+        }
+        notes.clear();
+    }
+}
+
+void PlayerThread::sendTrackEvent(MidiEvent *event) {
+    if (!event) return;
+    MidiTrack *track = event->track();
+    MidiTrack *solo = file ? file->soloTrack() : nullptr;
+    const bool audible = track && !track->muted() && (!solo || solo == track);
+    if (auto *on = dynamic_cast<NoteOnEvent *>(event)) {
+        const int key = (on->channel() << 8) | on->note();
+        if (on->velocity() > 0) {
+            if (audible) {
+                ++activeTrackNotes[track][key];
+                MidiOutput::sendCommand(event);
+            }
+        } else { // zero-velocity note on is a note off
+            auto &notes = activeTrackNotes[track];
+            if (notes.value(key) > 0) {
+                notes[key]--;
+                MidiOutput::sendCommand(event);
+            }
+        }
+        return;
+    }
+    if (auto *off = dynamic_cast<OffEvent *>(event)) {
+        auto *on = dynamic_cast<NoteOnEvent *>(off->onEvent());
+        if (on) {
+            const int key = (on->channel() << 8) | on->note();
+            auto &notes = activeTrackNotes[track];
+            if (notes.value(key) > 0) {
+                notes[key]--;
+                MidiOutput::sendCommand(event);
+            }
+        }
+        return;
+    }
+    // Allow tempo/meta processing elsewhere; send channel messages only
+    // for the audible tracks, except track-independent global events.
+    if (audible || !track) MidiOutput::sendCommand(event);
 }
 
 void PlayerThread::timeout() {
@@ -155,6 +221,8 @@ void PlayerThread::timeout() {
         }
         quit();
     } else {
+        // A mute/solo click is honored on the next 15 ms audio scheduling tick.
+        silenceMutedTracks();
         int newPos = position + time->elapsed() * MidiPlayer::speedScale();
         int tick = file->tick(newPos);
         QList<TimeSignatureEvent *> *list = 0;
@@ -186,7 +254,7 @@ void PlayerThread::timeout() {
             } while (it != events->end() && it.key() == sendPosition);
 
             foreach(MidiEvent* ev, offEv) {
-                MidiOutput::sendCommand(ev);
+                sendTrackEvent(ev);
             }
             foreach(MidiEvent* ev, onEv) {
                 if (ev->line() == MidiEvent::KEY_SIGNATURE_EVENT_LINE) {
@@ -209,7 +277,9 @@ void PlayerThread::timeout() {
 
                 if (AdditionalMidiSettingsWidget::trackBasedProgramChanges()) {
                     NoteOnEvent *n = dynamic_cast<NoteOnEvent *>(ev);
-                    if (n && n->track() && n->channel() >= 0 && n->channel() < 16) {
+                    if (n && n->track() && !n->track()->muted() &&
+                        (!file->soloTrack() || file->soloTrack() == n->track()) &&
+                        n->channel() >= 0 && n->channel() < 16) {
                         int prog = n->track()->progAtTick(n->midiTime());
                         if (currentChannelProgram[n->channel()] != prog) {
                             MidiOutput::sendProgram(n->channel(), prog);
@@ -218,7 +288,7 @@ void PlayerThread::timeout() {
                     }
                 }
                 
-                MidiOutput::sendCommand(ev);
+                sendTrackEvent(ev);
             }
 
             //MidiOutput::sendCommand(it.value());

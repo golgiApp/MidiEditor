@@ -25,6 +25,7 @@
 // Qt includes
 #include <QMultiMap>
 #include <QObject>
+#include <atomic>
 
 // Forward declarations
 class MidiEvent;
@@ -248,6 +249,10 @@ public:
      * \return Pointer to the MidiChannel instance
      */
     MidiChannel *channel(int i);
+
+    // One-track live solo, stored only at runtime (not in MIDI file).
+    void setSoloTrack(MidiTrack *track) { _soloTrack.store(track); }
+    MidiTrack *soloTrack() const { return _soloTrack.load(); }
 
     // === Playback Support ===
 
@@ -589,6 +594,7 @@ private:
 
     /** \brief Track management */
     QList<MidiTrack *> *_tracks;
+    std::atomic<MidiTrack *> _soloTrack{nullptr};
     QMap<MidiFile *, QMap<MidiTrack *, MidiTrack *> > pasteTracks;
 };
 

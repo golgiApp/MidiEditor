@@ -25,6 +25,7 @@
 // Qt includes
 #include <QObject>
 #include <QString>
+#include <atomic>
 
 // Forward declarations
 class TextEvent;
@@ -218,7 +219,8 @@ private:
     MidiFile *_file;
 
     /** \brief Track visibility and mute state */
-    bool _hidden, _muted;
+    bool _hidden;
+    std::atomic_bool _muted{false};
 
     /** \brief Default MIDI channel assignment */
     int _assignedChannel;

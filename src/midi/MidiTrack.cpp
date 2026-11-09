@@ -41,7 +41,7 @@ MidiTrack::MidiTrack(MidiTrack &other)
     _nameEvent = other._nameEvent;
     _file = other._file;
     _hidden = other._hidden;
-    _muted = other._muted;
+    _muted.store(other._muted.load());
     _assignedChannel = other._assignedChannel;
 }
 
@@ -112,7 +112,7 @@ void MidiTrack::reloadState(ProtocolEntry *entry) {
     _nameEvent = other->_nameEvent;
     _file = other->_file;
     _hidden = other->_hidden;
-    _muted = other->_muted;
+    _muted.store(other->_muted.load());
     _assignedChannel = other->_assignedChannel;
 }
 

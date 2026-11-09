@@ -36,6 +36,7 @@
 
 // Forward declarations
 class MidiFile;
+class MidiTrack;
 class TempoChangeEvent;
 class TimeSignatureEvent;
 class MidiEvent;
@@ -104,6 +105,14 @@ public:
      * \return The current MidiFile, or nullptr if none loaded
      */
     MidiFile *midiFile();
+
+    // Workspace-only display filter; this does not mutate MidiTrack::hidden().
+    void setFocusedTrack(MidiTrack *track) {
+        _focusedTrack = track;
+        registerRelayout();
+        update();
+    }
+    MidiTrack *focusedTrack() const { return _focusedTrack; }
 
     // === Event Access ===
 
@@ -707,6 +716,7 @@ private:
 
     /** \brief Currently loaded MIDI file */
     MidiFile *file;
+    MidiTrack *_focusedTrack = nullptr;
 
     // === Display Areas ===
 

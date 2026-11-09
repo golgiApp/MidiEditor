@@ -35,6 +35,7 @@
 
 // Forward declarations
 class MatrixWidget;
+class ArrangementWidget;
 class OpenGLMatrixWidget;
 class OpenGLMiscWidget;
 class MidiEvent;
@@ -936,6 +937,9 @@ private:
     /** \brief Main matrix widget for MIDI editing (internal widget for data access) */
     MatrixWidget *mw_matrixWidget;
 
+    /** Logic-inspired arrangement editor displayed above the Piano Roll. */
+    ArrangementWidget *_arrangementWidget = nullptr;
+
     /** \brief Container for the displayed matrix widget (OpenGL or software) */
     QWidget *_matrixWidgetContainer;
 
@@ -1026,6 +1030,10 @@ private:
     QAction *setSingleMode, *setLineMode, *setFreehandMode, *_allChannelsVisible, *_allChannelsInvisible,
     *_allTracksAudible, *_allTracksMute, *_allChannelsAudible, *_allChannelsMute, *_allTracksVisible,
     *_allTracksInvisible, *stdToolAction, *undoAction, *redoAction, *_pasteAction;
+
+    // FFXIV workspace: show selected instrument or original stacked multi-track roll.
+    bool _showAllTracksInPianoRoll = false;
+    QAction *_showAllTracksInPianoRollAction = nullptr;
 
     // === Game Support Actions ===
 
