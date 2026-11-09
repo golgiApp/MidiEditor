@@ -45,6 +45,8 @@
 #include "../MidiEvent/NoteOnEvent.h"
 #include "../MidiEvent/OffEvent.h"
 #include "../protocol/Protocol.h"
+#include "../protocol/ProtocolEntry.h"
+#include "../protocol/ProtocolItem.h"
 
 class ArrangementWidget final : public QWidget {
 public:
@@ -451,28 +453,14 @@ protected:
                 setSelectedTrack(track);
                 if (selectTrackRequested) selectTrackRequested(track);
                 QMenu menu(this);
-                // Exact-click splitting is pixel-accurate at the current zoom
-                // rather than silently jumping to a nearby note/measure.
-                QAction *splitHere = menu.addAction(tr("Split Here (Exact Click)"));
+                QAction *splitHere = menu.addAction(tr("Split Here"));
                 splitHere->setEnabled(tick > region->startTick && tick < region->endTick());
-                const int tpq = std::max(1, _file->ticksPerQuarter());
-                const int sixteenth = xiv::snapToQuarterSubdivision(tick, tpq, 4);
-                const int quarter = xiv::snapToQuarterSubdivision(tick, tpq, 1);
-                QAction *split16th = menu.addAction(tr("Split at Nearest 1/16 Note"));
-                split16th->setEnabled(sixteenth > region->startTick &&
-                                       sixteenth < region->endTick());
-                QAction *splitBeat = menu.addAction(tr("Split at Nearest Beat"));
-                splitBeat->setEnabled(quarter > region->startTick &&
-                                      quarter < region->endTick());
-                menu.addSeparator();
                 const int cursorTick = _file->cursorTick();
-                QAction *splitAtCursor = menu.addAction(tr("Split Region at Playhead"));
+                QAction *splitAtCursor = menu.addAction(tr("Split at Play Head"));
                 splitAtCursor->setEnabled(cursorTick > region->startTick &&
                                           cursorTick < region->endTick());
                 QAction *chosen = menu.exec(e->globalPos());
                 if (chosen == splitHere) splitRegion(id, tick);
-                else if (chosen == split16th) splitRegion(id, sixteenth);
-                else if (chosen == splitBeat) splitRegion(id, quarter);
                 else if (chosen == splitAtCursor) splitRegion(id, cursorTick);
                 update();
                 e->accept();
@@ -704,6 +692,53 @@ protected:
     }
 
 private:
+    // Region edits share MidiEditor's existing Protocol undo/redo stack with
+    // ordinary note edits. A snapshot stores only independent region metadata.
+    // The live target remains owned by this ArrangementWidget; ProtocolItem
+    // snapshots are heap allocated and released by the regular Protocol stack.
+    class RegionHistoryEntry final : public ProtocolEntry {
+    public:
+        explicit RegionHistoryEntry(ArrangementWidget *widget)
+            : _owner(widget), _fileAtCapture(widget ? widget->_file.data() : nullptr) {
+            if (widget) {
+                _regionsAtCapture = widget->_regions.regions();
+                _selectedAtCapture = widget->_selectedRegionId;
+            }
+        }
+        MidiFile *file() override {
+            // The persistent target is created before a MIDI file is opened;
+            // look up the current document instead of retaining that nullptr.
+            auto *w = owner();
+            return w ? w->_file.data() : nullptr;
+        }
+        ProtocolEntry *copy() override {
+            auto *w = owner();
+            return w ? new RegionHistoryEntry(w) : nullptr;
+        }
+        void reloadState(ProtocolEntry *entry) override {
+            auto *old = dynamic_cast<RegionHistoryEntry *>(entry);
+            auto *w = owner();
+            if (!w || !old || !w->_file || !w->_regionsReady ||
+                old->_fileAtCapture.data() != w->_file.data() ||
+                !w->_regions.replaceValidated(old->_regionsAtCapture,
+                                              w->_file->tracks()->size())) return;
+            w->_selectedRegionId = old->_selectedAtCapture;
+            // Undo and Redo also persist the restored layout, so a reopened
+            // document matches the visible arrangement after the shortcut.
+            if (!w->_file->path().isEmpty() && QFileInfo::exists(w->_file->path()))
+                w->saveRegionLayout();
+            w->update();
+        }
+    private:
+        ArrangementWidget *owner() const {
+            return static_cast<ArrangementWidget *>(_owner.data());
+        }
+        QPointer<QWidget> _owner;
+        QPointer<MidiFile> _fileAtCapture;
+        std::vector<xiv::MidiRegion> _regionsAtCapture;
+        int _selectedAtCapture = 0;
+    };
+
     struct PreviewNote {
         int beginMs, endMs, pitch, beginTick, endTick;
     };
@@ -732,9 +767,15 @@ private:
     }
     void splitRegion(int id, int tick) {
         if (!_file) return;
+        // Snapshot BEFORE modifying the region model. Register the operation
+        // in the same MIDI Protocol used by Ctrl+Z / Ctrl+Y elsewhere.
+        ProtocolEntry *before = _regionHistory.copy();
         const int newId = _regions.split(id, tick);
-        if (!newId) return;
+        if (!newId) { delete before; return; }
         _selectedRegionId = newId;
+        _file->protocol()->startNewAction(tr("Split Region"));
+        _file->protocol()->enterUndoStep(new ProtocolItem(before, &_regionHistory));
+        _file->protocol()->endAction();
         // Persist only the region metadata; note contents remain unmodified.
         if (!_file->path().isEmpty() && QFileInfo::exists(_file->path()) &&
             !saveRegionLayout()) {
@@ -790,6 +831,7 @@ private:
     int _dragStartMs = 0;
     int _hoverTick = -1;
     int _hoverRow = -1;
+    RegionHistoryEntry _regionHistory{this};
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     // Hit targets match the painted buttons. Do not overlap the track name.

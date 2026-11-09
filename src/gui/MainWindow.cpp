@@ -4539,7 +4539,7 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
 
     // Edit
     undoAction = new QAction(tr("Undo"), this);
-    undoAction->setShortcut(QKeySequence::Undo);
+    undoAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z));
     _defaultShortcuts["undo"] = QList<QKeySequence>() << undoAction->shortcut();
     Appearance::setActionIcon(undoAction, ":/run_environment/graphics/tool/undo.png");
     connect(undoAction, SIGNAL(triggered()), this, SLOT(undo()));
@@ -4547,7 +4547,7 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     _actionMap["undo"] = undoAction;
 
     redoAction = new QAction(tr("Redo"), this);
-    redoAction->setShortcut(QKeySequence::Redo);
+    redoAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Y));
     _defaultShortcuts["redo"] = QList<QKeySequence>() << redoAction->shortcut();
     Appearance::setActionIcon(redoAction, ":/run_environment/graphics/tool/redo.png");
     connect(redoAction, SIGNAL(triggered()), this, SLOT(redo()));
