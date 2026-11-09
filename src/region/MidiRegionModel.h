@@ -90,6 +90,50 @@ public:
         }
         return 0;
     }
+    // Non-destructive arrangement movement. Only the destination timeline
+    // changes: sourceStartTick/sourceEndTick retain the original musical data.
+    // Reject overlapping regions and integer overflow before mutating state.
+    // Cross-track movement is intentionally deferred until instrument/channel
+    // routing and MIDI export can honor it correctly.
+    bool canMove(int id, int newStartTick) const {
+        const MidiRegion *target = find(id);
+        if (!target || newStartTick < 0 ||
+            static_cast<int64_t>(newStartTick) + target->duration() >
+                std::numeric_limits<int>::max()) return false;
+        const int64_t newEndTick = static_cast<int64_t>(newStartTick) + target->duration();
+        for (const auto &r : _regions) {
+            if (r.id == id || r.trackIndex != target->trackIndex) continue;
+            if (newStartTick < r.endTick() && r.startTick < newEndTick) return false;
+        }
+        return true;
+    }
+    bool move(int id, int newStartTick) {
+        if (!canMove(id, newStartTick)) return false;
+        for (auto &r : _regions) {
+            if (r.id == id) {
+                r.startTick = newStartTick;
+                return true;
+            }
+        }
+        return false;
+    }
+    // Place a new independent instance of the same source interval, provided
+    // it will not overlap an existing region on this track.
+    int duplicate(int id, int newStartTick) {
+        const MidiRegion *target = find(id);
+        if (!target || newStartTick < 0) return 0;
+        const int64_t newEnd = static_cast<int64_t>(newStartTick) + target->duration();
+        if (newEnd > std::numeric_limits<int>::max()) return 0;
+        for (const auto &other : _regions) {
+            if (other.trackIndex == target->trackIndex &&
+                newStartTick < other.endTick() && other.startTick < newEnd) return 0;
+        }
+        const MidiRegion source = *target; // snapshot before vector growth
+        const int newId = _nextId++;
+        _regions.push_back({newId, source.trackIndex, newStartTick,
+                            source.sourceStartTick, source.sourceEndTick});
+        return newId;
+    }
     // Validate sidecar records before replacing the active model. A stale or
     // malformed layout must never partially install into the live UI.
     bool replaceValidated(const std::vector<MidiRegion> &incoming, int trackCount) {
