@@ -1375,6 +1375,12 @@ QColor Appearance::pianoWhiteKeyColor() {
     return Qt::white;
 }
 
+// Used by the Piano Roll time ruler. Keep the ruler background consistent
+// with the selected application theme instead of using a fixed light color.
+QColor Appearance::pianoRulerColor() {
+    return systemWindowColor();
+}
+
 QColor Appearance::pianoBlackKeyColor() {
     if (_applicationTheme == ThemeMaterialDark) {
         return QColor(22, 22, 25);
