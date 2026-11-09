@@ -506,11 +506,28 @@ MainWindow::MainWindow(QString initFile)
     _arrangementWidget->scrollTimeRequested = [this](int ms) {
         if (hori) hori->setValue(ms);
     };
+    _arrangementWidget->seekTimeRequested = [this](int ms) {
+        if (!file || MidiInput::recording()) return;
+        // Playback is based on MidiFile::cursorTick() (or an older pauseTick).
+        // Stop first, then replace both so the next Play starts at this click.
+        if (MidiPlayer::isPlaying()) stop();
+        const int tick = std::clamp(file->tick(std::max(0, ms)), 0,
+                                    std::max(0, file->endTick()));
+        file->setPauseTick(-1);
+        file->setCursorTick(tick);
+        const int actualMs = file->msOfTick(tick);
+        if (_arrangementWidget) _arrangementWidget->setCursorMs(actualMs);
+        if (OpenGLMatrixWidget *gl = qobject_cast<OpenGLMatrixWidget*>(_matrixWidgetContainer)) {
+            gl->timeMsChanged(actualMs, true);
+        } else if (MatrixWidget *matrix = qobject_cast<MatrixWidget*>(_matrixWidgetContainer)) {
+            matrix->timeMsChanged(actualMs, true);
+        }
+        _matrixWidgetContainer->update();
+    };
     connect(hori, &QScrollBar::valueChanged, _arrangementWidget,
             &ArrangementWidget::setOriginMs);
-    connect(MidiPlayer::playerThread(), &PlayerThread::timeMsChanged,
-            _arrangementWidget, &ArrangementWidget::setPlayheadMs,
-            Qt::QueuedConnection);
+    // MidiPlayer::play() replaces PlayerThread on Windows. Connect its
+    // arrangement playhead clock after each Play/Record instead.
     arrangementArea->setMinimumHeight(105);
     // The arrangement can be resized independently from the Piano Roll.
     leftSplitter->setStretchFactor(0, 3);  // arrangement
@@ -907,7 +924,17 @@ void MainWindow::setFile(MidiFile *newFile) {
     protocolWidget->setFile(newFile);
     channelWidget->setFile(newFile);
     _trackWidget->setFile(newFile);
-    if (_arrangementWidget) _arrangementWidget->setFile(newFile);
+    if (_arrangementWidget) {
+        _arrangementWidget->setFile(newFile);
+        // Keep the arrangement cursor in sync when clicking/seeking in the
+        // Piano Roll or navigating with transport buttons while stopped.
+        connect(newFile, &MidiFile::cursorPositionChanged, _arrangementWidget,
+                [this, newFile]() {
+                    if (_arrangementWidget && file == newFile && !MidiPlayer::isPlaying()) {
+                        _arrangementWidget->setCursorMs(newFile->msOfTick(newFile->cursorTick()));
+                    }
+                });
+    }
     eventWidget()->setFile(newFile);
 
     Tool::setFile(newFile);
@@ -1005,6 +1032,7 @@ void MainWindow::play() {
         return;
     }
     if (file && !MidiInput::recording() && !MidiPlayer::isPlaying()) {
+        if (_arrangementWidget) _arrangementWidget->setCursorMs(file->msOfTick(file->cursorTick()));
         // Update playback cursor position using the appropriate widget type
         if (OpenGLMatrixWidget *openglMatrix = qobject_cast<OpenGLMatrixWidget*>(_matrixWidgetContainer)) {
             openglMatrix->timeMsChanged(file->msOfTick(file->cursorTick()), true);
@@ -1027,6 +1055,14 @@ void MainWindow::play() {
         // Connect playback cursor updates for all platforms (not just Windows)
         // This is essential for the playback cursor to move during playback
         connect(MidiPlayer::playerThread(), SIGNAL(timeMsChanged(int)), _matrixWidgetContainer, SLOT(timeMsChanged(int)));
+        // Reconnect after every Play; Windows replaces the player thread.
+        PlayerThread *currentPlayer = MidiPlayer::playerThread();
+        connect(currentPlayer, &PlayerThread::timeMsChanged,
+                _arrangementWidget, [this, currentPlayer](int positionMs) {
+                    if (_arrangementWidget && MidiPlayer::isPlaying() &&
+                        MidiPlayer::playerThread() == currentPlayer)
+                        _arrangementWidget->setPlayheadMs(positionMs);
+                }, Qt::QueuedConnection);
     }
 }
 
@@ -1078,6 +1114,13 @@ void MainWindow::record() {
             // Connect playback cursor updates for all platforms (not just Windows)
             // This is essential for the playback cursor to move during playback
             connect(MidiPlayer::playerThread(), SIGNAL(timeMsChanged(int)), _matrixWidgetContainer, SLOT(timeMsChanged(int)));
+            PlayerThread *currentPlayer = MidiPlayer::playerThread();
+            connect(currentPlayer, &PlayerThread::timeMsChanged,
+                    _arrangementWidget, [this, currentPlayer](int positionMs) {
+                        if (_arrangementWidget && MidiPlayer::isPlaying() &&
+                            MidiPlayer::playerThread() == currentPlayer)
+                            _arrangementWidget->setPlayheadMs(positionMs);
+                    }, Qt::QueuedConnection);
         }
     }
 }
@@ -1227,6 +1270,7 @@ void MainWindow::backToBegin() {
 
     file->setPauseTick(0);
     file->setCursorTick(0);
+    if (_arrangementWidget) _arrangementWidget->setCursorMs(0);
 
     _matrixWidgetContainer->update();
 }
