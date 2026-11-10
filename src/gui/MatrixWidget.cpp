@@ -58,6 +58,7 @@
 #include <cmath>
 #include <QContextMenuEvent>
 #include <QMenu>
+#include <QToolTip>
 #include <QInputDialog>
 #include <QWidgetAction>
 #include <QHBoxLayout>
@@ -207,7 +208,8 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
 
             // BOUNDS CLAMPING
             if (finalStartTime < 0) finalStartTime = 0;
-            int maxStart = file->maxTime() - viewportDurationMs;
+            int maxStart = std::max(file->maxTime(),
+                file->msOfTick(file->arrangementEndTick())) - viewportDurationMs;
             if (finalStartTime > maxStart) finalStartTime = maxStart;
             if (finalStartTime < 0) finalStartTime = 0;
 
@@ -252,9 +254,12 @@ void MatrixWidget::scrollXChanged(int scrollPositionX) {
     if (startTimeX < 0) {
         endTimeX -= startTimeX;
         startTimeX = 0;
-    } else if (endTimeX > file->maxTime()) {
-        startTimeX += file->maxTime() - endTimeX;
-        endTimeX = file->maxTime();
+    } else if (endTimeX > std::max(file->maxTime(),
+                        file->msOfTick(file->arrangementEndTick()))) {
+        const int timelineEnd = std::max(file->maxTime(),
+                           file->msOfTick(file->arrangementEndTick()));
+        startTimeX += timelineEnd - endTimeX;
+        endTimeX = timelineEnd;
         if (startTimeX < 0) startTimeX = 0;
     }
 
@@ -869,6 +874,47 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         painter->setPen(_cachedForegroundColor);
     }
 
+    // Projected region notes are drawn at ARRANGED MIDI ticks, not source
+    // ticks. This also shows moved, trimmed and repeated notes correctly.
+    if (_regionViewEnabled) {
+        painter->save();
+        painter->setClipRect(QRect(lineNameWidth, timeHeight,
+                                   std::max(0, width() - lineNameWidth),
+                                   std::max(0, height() - timeHeight)));
+        painter->setPen(Qt::NoPen);
+        for (const auto &n : _regionViewNotes) {
+            if (_regionEditingSafe) continue;  // native editable notes are visible
+            const int line = 127 - n.pitch;
+            if (line < startLineY || line > endLineY) continue;
+            const int begin = xPosOfMs(file->msOfTick(n.startTick));
+            const int end = xPosOfMs(file->msOfTick(n.endTick));
+            if (end <= lineNameWidth || begin >= width()) continue;
+            const int x = std::max(lineNameWidth, begin);
+            const int ex = std::min(width(), end);
+            if (ex <= x) continue;
+            const int y = yPosOfLine(line);
+            const int h = std::max(3, static_cast<int>(lineHeight()) - 2);
+            QColor accent("#7DB8D9");
+            if (n.trackIndex >= 0 && n.trackIndex < file->tracks()->size()) {
+                MidiTrack *track = file->tracks()->at(n.trackIndex);
+                if (track && track->color()) accent = *track->color();
+            }
+            painter->fillRect(QRect(x, y + 1, ex - x, h), accent);
+            painter->setPen(QColor("#C8D6E2"));
+            painter->drawRect(QRect(x, y + 1, std::max(0, ex - x - 1),
+                                    std::max(0, h - 1)));
+            painter->setPen(Qt::NoPen);
+        }
+        if (!_regionShowAll && _selectedViewRegionId == 0) {
+            painter->setPen(QColor("#BFC7D3"));
+            painter->drawText(QRect(lineNameWidth + 12, timeHeight + 15,
+                                    std::max(0, width() - lineNameWidth - 24), 40),
+                              Qt::AlignLeft | Qt::AlignVCenter,
+                              tr("Select a MIDI region above to display its notes"));
+        }
+        painter->restore();
+    }
+
     if (Tool::currentTool()) {
         painter->setClipping(true);
         painter->setClipRect(ToolArea);
@@ -979,6 +1025,21 @@ void MatrixWidget::paintChannel(QPainter *painter, int channel) {
 
     for (; it != end; ++it) {
         MidiEvent *currentEvent = it.value();
+        if (_regionViewEnabled &&
+            (dynamic_cast<NoteOnEvent *>(currentEvent) ||
+             dynamic_cast<OffEvent *>(currentEvent))) {
+            if (!_regionEditingSafe) continue;
+            const auto *region = _regionViewModel.find(_selectedViewRegionId);
+            auto *on = dynamic_cast<NoteOnEvent *>(currentEvent);
+            if (!on) {
+                auto *off = dynamic_cast<OffEvent *>(currentEvent);
+                on = off ? dynamic_cast<NoteOnEvent *>(off->onEvent()) : nullptr;
+            }
+            if (!region || !on || !on->track() ||
+                file->tracks()->indexOf(on->track()) != region->trackIndex ||
+                on->midiTime() < region->sourceStartTick ||
+                on->midiTime() >= region->sourceEndTick) continue;
+        }
         if (_focusedTrack && currentEvent->track() != _focusedTrack) {
             continue; // Only the selected instrument is shown and hit-testable.
         }
@@ -1333,6 +1394,10 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
 void MatrixWidget::setFile(MidiFile *f) {
     stopAllEmulationNotes();
     file = f;
+    _regionViewNotes.clear();
+    _regionViewEnabled = false;
+    _regionEditingSafe = false;
+    _selectedViewRegionId = 0;
 
     scaleX = 1;
     scaleY = 1;
@@ -1343,6 +1408,9 @@ void MatrixWidget::setFile(MidiFile *f) {
 
     connect(file->protocol(), SIGNAL(actionFinished()), this, SLOT(registerRelayout()));
     connect(file->protocol(), SIGNAL(actionFinished()), this, SLOT(update()));
+    connect(file->protocol(), &Protocol::actionFinished, this, [this]() {
+        if (_regionViewEnabled) { refreshRegionViewNotes(); update(); }
+    });
 
     calcSizes();
 
@@ -1374,7 +1442,8 @@ void MatrixWidget::calcSizes() {
     if (!file) {
         return;
     }
-    int time = file->maxTime();
+    int time = std::max(file->maxTime(),
+                        file->msOfTick(file->arrangementEndTick()));
     int timeInWidget = ((width() - lineNameWidth) * 1000) / (PIXEL_PER_S * scaleX);
 
     // Timeline Ruler is always 50px
@@ -1405,6 +1474,77 @@ MidiFile *MatrixWidget::midiFile() {
     return file;
 }
 
+// Arrange-view projection: only the selected region is visible by default.
+// The underlying MIDI events are intentionally left unmodified. Until note
+// editing is made region-local, these display notes are read-only.
+void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
+                                 int selectedRegionId, bool showAllRegions,
+                                 bool navigate) {
+    const bool changedSelection = _selectedViewRegionId != selectedRegionId ||
+                                  _regionShowAll != showAllRegions;
+    _regionViewModel = model;
+    _selectedViewRegionId = selectedRegionId;
+    _regionShowAll = showAllRegions;
+    _regionViewEnabled = true;
+    const auto *focusedRegion = _regionViewModel.find(selectedRegionId);
+    // Existing native edit tools remain enabled where their source note
+    // positions still equal the arranged display. Transformed/looped regions
+    // need dedicated region-note IDs before editing may safely be enabled.
+    _regionEditingSafe = !_regionShowAll && focusedRegion &&
+        focusedRegion->startTick == focusedRegion->sourceStartTick &&
+        focusedRegion->loopLengthTicks == 0 && !focusedRegion->quantize.active() &&
+        focusedRegion->endNoteMode == xiv::CrossingNoteMode::Keep &&
+        (focusedRegion->sourceStartTick == 0 ||
+         focusedRegion->startNoteMode == xiv::CrossingNoteMode::Keep);
+    refreshRegionViewNotes();
+
+    if (navigate && changedSelection && file && !showAllRegions) {
+        const auto *region = _regionViewModel.find(selectedRegionId);
+        if (region) {
+            int highestPitch = -1;
+            for (const auto &note : _regionViewNotes)
+                highestPitch = std::max(highestPitch, note.pitch);
+            if (highestPitch >= 0)
+                startLineY = std::clamp(127 - highestPitch - 5, 0, 110);
+            startTimeX = std::max(0, file->msOfTick(region->startTick));
+            calcSizes();
+            emit scrollChanged(startTimeX,
+                std::max(0, std::max(file->maxTime(),
+                    file->msOfTick(file->arrangementEndTick())) -
+                    (endTimeX - startTimeX)),
+                startLineY, std::max(0, NUM_LINES - (endLineY-startLineY)));
+        }
+    }
+    registerRelayout();
+    update();
+}
+
+void MatrixWidget::refreshRegionViewNotes() {
+    _regionViewNotes.clear();
+    if (!_regionViewEnabled || !file) return;
+    std::vector<xiv::SourceRegionNote> source;
+    int id = 1;
+    for (int channel = 0; channel < 16; ++channel) {
+        auto *events = file->channelEvents(channel);
+        if (!events) continue;
+        for (auto it = events->cbegin(); it != events->cend(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || !note->track() || !note->offEvent() ||
+                note->velocity() <= 0 ||
+                note->offEvent()->midiTime() <= note->midiTime()) continue;
+            const int index = file->tracks()->indexOf(note->track());
+            if (index < 0) continue;
+            source.push_back({id++, index, note->midiTime(),
+                              note->offEvent()->midiTime(), note->note(),
+                              note->velocity(), note->channel()});
+        }
+    }
+    for (const auto &n : xiv::renderRegionNotes(source, _regionViewModel)) {
+        if (_regionShowAll || n.regionId == _selectedViewRegionId)
+            _regionViewNotes.push_back(n);
+    }
+}
+
 // XIV MIDI Studio: pitch-key selection always searches the whole focused track,
 // including notes in other regions and outside the displayed time window.
 void MatrixWidget::selectPitchRange(int low, int high) {
@@ -1421,6 +1561,14 @@ void MatrixWidget::selectPitchRange(int low, int high) {
             auto *note = dynamic_cast<NoteOnEvent *>(it.value());
             if (!note || note->velocity() <= 0 || !note->offEvent()) continue;
             if (_focusedTrack && note->track() != _focusedTrack) continue;
+            if (_regionViewEnabled) {
+                if (!_regionEditingSafe) continue;
+                const auto *region = _regionViewModel.find(_selectedViewRegionId);
+                if (!region || !note->track() ||
+                    file->tracks()->indexOf(note->track()) != region->trackIndex ||
+                    note->midiTime() < region->sourceStartTick ||
+                    note->midiTime() >= region->sourceEndTick) continue;
+            }
             if (note->note() >= low && note->note() <= high && !seen.contains(note)) {
                 selected.append(note);
                 seen.insert(note);
@@ -1671,6 +1819,17 @@ void MatrixWidget::leaveEvent(QEvent *event) {
 }
 
 void MatrixWidget::mousePressEvent(QMouseEvent *event) {
+    // Do not let source-based tools alter the wrong notes when a projected
+    // region has been moved, trimmed or looped. Region-local editing requires
+    // a dedicated source-ID mapping and is not enabled in this preview.
+    if (_regionViewEnabled && !_regionEditingSafe &&
+        event->position().x() >= lineNameWidth &&
+        event->position().y() >= timeHeight) {
+        QToolTip::showText(event->globalPosition().toPoint(),
+            tr("Region note preview: editing arranged note copies is still in development"), this);
+        event->accept();
+        return;
+    }
     // Left drag on the piano-key gutter selects an inclusive range of pitches.
     // Alt+left retains the former note-audition shortcut; right click retains
     // drum-key visual marking and latch operations.
@@ -2586,6 +2745,10 @@ void MatrixWidget::keyReleaseEvent(QKeyEvent *event) {
 
 void MatrixWidget::contextMenuEvent(QContextMenuEvent* event)
 {
+    if (_regionViewEnabled && !_regionEditingSafe) {
+        event->accept(); // do not offer source-note edits for projections
+        return;
+    }
     // Context menu requires Ctrl + Right Click
     if (!(QApplication::keyboardModifiers() & Qt::ControlModifier)) {
         return;

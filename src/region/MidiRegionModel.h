@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <set>
 #include <vector>
 
 namespace xiv {
@@ -28,6 +29,22 @@ inline bool validCrossingNoteMode(CrossingNoteMode mode) {
            mode == CrossingNoteMode::Split;
 }
 
+struct RegionQuantize {
+    int gridTicks = 0;
+    int strength = 100;
+    int swing = 50;
+
+    bool valid() const {
+        return gridTicks >= 0 && strength >= 0 && strength <= 100 &&
+               swing >= 50 && swing <= 75;
+    }
+    bool active() const { return gridTicks > 0 && strength > 0; }
+    bool operator==(const RegionQuantize &other) const {
+        return gridTicks == other.gridTicks && strength == other.strength &&
+               swing == other.swing;
+    }
+};
+
 struct MidiRegion {
     int id = 0;
     int trackIndex = 0;
@@ -38,15 +55,22 @@ struct MidiRegion {
     // Default keeps existing sidecars' original legato splitting behavior.
     CrossingNoteMode startNoteMode = CrossingNoteMode::Split;
     CrossingNoteMode endNoteMode = CrossingNoteMode::Keep;
+    // Zero means one ordinary playthrough. Positive values >= duration()
+    // extend the region with full or partial repeats of its original source.
+    int loopLengthTicks = 0;
+    RegionQuantize quantize{};
 
     int duration() const { return sourceEndTick - sourceStartTick; }
-    int endTick() const { return startTick + duration(); }
+    int displayDuration() const { return loopLengthTicks > 0 ? loopLengthTicks : duration(); }
+    int endTick() const { return startTick + displayDuration(); }
     bool valid() const {
-        return id > 0 && trackIndex >= 0 && startTick >= 0 && sourceStartTick >= 0 &&
+        return quantize.valid() && id > 0 && trackIndex >= 0 && startTick >= 0 && sourceStartTick >= 0 &&
                validCrossingNoteMode(startNoteMode) && validCrossingNoteMode(endNoteMode) &&
-               sourceEndTick > sourceStartTick &&
-               static_cast<int64_t>(startTick) + sourceEndTick - sourceStartTick <=
-                   std::numeric_limits<int>::max();
+               sourceEndTick > sourceStartTick && loopLengthTicks >= 0 &&
+               (loopLengthTicks == 0 || loopLengthTicks >= duration()) &&
+               static_cast<int64_t>(startTick) + displayDuration() <=
+                   std::numeric_limits<int>::max() &&
+               (loopLengthTicks == 0 || loopLengthTicks / duration() <= 10000);
     }
     bool contains(int timelineTick) const {
         return timelineTick >= startTick && timelineTick < endTick();
@@ -74,11 +98,65 @@ inline bool projectNote(const MidiRegion &region, int noteStartTick,
 class MidiRegionModel {
 public:
     const std::vector<MidiRegion> &regions() const { return _regions; }
-    void clear() { _regions.clear(); _nextId = 1; }
+    void clear() { _regions.clear(); _nextId = 1; _managedTracks.clear(); }
+    // Even when its last region is deleted, the track remains managed and
+    // renders silence rather than reverting to the original MIDI notes.
+    bool isManagedTrack(int trackIndex) const {
+        return _managedTracks.count(trackIndex) != 0;
+    }
+    const std::set<int> &managedTracks() const { return _managedTracks; }
+    bool setQuantize(int id, const RegionQuantize &settings) {
+        if (!settings.valid()) return false;
+        for (auto &region : _regions) {
+            if (region.id != id || region.quantize == settings) continue;
+            region.quantize = settings;
+            return true;
+        }
+        return false;
+    }
+    void markManagedTrack(int trackIndex) {
+        if (trackIndex >= 0) _managedTracks.insert(trackIndex);
+    }
+    bool remove(int id) {
+        auto it = std::find_if(_regions.begin(), _regions.end(),
+                               [id](const MidiRegion &r) { return r.id == id; });
+        if (it == _regions.end()) return false;
+        _managedTracks.insert(it->trackIndex);
+        _regions.erase(it);
+        return true;
+    }
+    bool canLoop(int id, int newEndTick) const {
+        const auto *r = find(id);
+        if (!r || newEndTick < r->startTick + r->duration() ||
+            newEndTick <= 0 ||
+            (static_cast<int64_t>(newEndTick) - r->startTick) / r->duration() > 10000)
+            return false;
+        for (const auto &other : _regions)
+            if (other.id != id && other.trackIndex == r->trackIndex &&
+                r->startTick < other.endTick() && other.startTick < newEndTick)
+                return false;
+        return true;
+    }
+    bool loopTo(int id, int newEndTick) {
+        if (!canLoop(id, newEndTick)) return false;
+        for (auto &r : _regions) if (r.id == id) {
+            r.loopLengthTicks = newEndTick - r.startTick == r.duration() ? 0 :
+                                newEndTick - r.startTick;
+            return true;
+        }
+        return false;
+    }
+    bool clearLoop(int id) {
+        for (auto &r : _regions) if (r.id == id && r.loopLengthTicks != 0) {
+            r.loopLengthTicks = 0; return true;
+        }
+        return false;
+    }
     int addInitial(int trackIndex, int sourceStartTick, int sourceEndTick) {
         if (trackIndex < 0 || sourceStartTick < 0 || sourceEndTick <= sourceStartTick) return 0;
         const int id = _nextId++;
         _regions.push_back({id, trackIndex, sourceStartTick, sourceStartTick, sourceEndTick});
+        _managedTracks.insert(trackIndex);
         return id;
     }
     const MidiRegion *find(int id) const {
@@ -97,7 +175,8 @@ public:
               CrossingNoteMode behavior = CrossingNoteMode::Keep) {
         if (!validCrossingNoteMode(behavior)) return 0;
         for (auto &r : _regions) {
-            if (r.id != id || timelineTick <= r.startTick || timelineTick >= r.endTick()) continue;
+            if (r.id != id || r.loopLengthTicks > 0 ||
+                timelineTick <= r.startTick || timelineTick >= r.endTick()) continue;
             const int sourceSplit = r.sourceStartTick + (timelineTick - r.startTick);
             const int oldEnd = r.sourceEndTick;
             const CrossingNoteMode previousEndMode = r.endNoteMode;
@@ -105,7 +184,7 @@ public:
             r.endNoteMode = behavior;
             const int newId = _nextId++;
             _regions.push_back({newId, r.trackIndex, timelineTick, sourceSplit,
-                                oldEnd, behavior, previousEndMode});
+                                oldEnd, behavior, previousEndMode, 0, r.quantize});
             return newId;
         }
         return 0;
@@ -118,9 +197,9 @@ public:
     bool canMove(int id, int newStartTick) const {
         const MidiRegion *target = find(id);
         if (!target || newStartTick < 0 ||
-            static_cast<int64_t>(newStartTick) + target->duration() >
+            static_cast<int64_t>(newStartTick) + target->displayDuration() >
                 std::numeric_limits<int>::max()) return false;
-        const int64_t newEndTick = static_cast<int64_t>(newStartTick) + target->duration();
+        const int64_t newEndTick = static_cast<int64_t>(newStartTick) + target->displayDuration();
         for (const auto &r : _regions) {
             if (r.id == id || r.trackIndex != target->trackIndex) continue;
             if (newStartTick < r.endTick() && r.startTick < newEndTick) return false;
@@ -141,7 +220,7 @@ public:
     bool canDuplicate(int id, int newStartTick) const {
         const MidiRegion *target = find(id);
         if (!target || newStartTick < 0) return false;
-        const int64_t newEnd = static_cast<int64_t>(newStartTick) + target->duration();
+        const int64_t newEnd = static_cast<int64_t>(newStartTick) + target->displayDuration();
         if (newEnd > std::numeric_limits<int>::max()) return false;
         for (const auto &other : _regions) {
             if (other.trackIndex == target->trackIndex &&
@@ -155,7 +234,8 @@ public:
         const int newId = _nextId++;
         _regions.push_back({newId, source.trackIndex, newStartTick,
                             source.sourceStartTick, source.sourceEndTick,
-                            source.startNoteMode, source.endNoteMode});
+                            source.startNoteMode, source.endNoteMode,
+                            source.loopLengthTicks, source.quantize});
         return newId;
     }
     // Trim the left boundary while preserving the source/timeline offset.
@@ -182,6 +262,7 @@ public:
                 // Trimming the left edge intentionally starts a new note where
                 // a sustained source note enters the shortened region.
                 r.startNoteMode = CrossingNoteMode::Split;
+                r.loopLengthTicks = 0;
                 return true;
             }
         }
@@ -211,6 +292,7 @@ public:
                 r.sourceEndTick += newEndTick - r.endTick();
                 // The trimmed region stops notes at its new right edge.
                 r.endNoteMode = CrossingNoteMode::Shorten;
+                r.loopLengthTicks = 0;
                 return true;
             }
         }
@@ -227,7 +309,7 @@ public:
                 track.push_back(r);
             }
         }
-        if (track.empty()) return true;
+        if (track.empty()) return !isManagedTrack(trackIndex);
         std::sort(track.begin(), track.end(), [](const auto &a, const auto &b) {
             return a.sourceStartTick < b.sourceStartTick;
         });
@@ -235,7 +317,9 @@ public:
         for (const auto &r : track) {
             // Split and Shorten change the rendered MIDI note schedule even
             // if the region positions still match their original source.
-            if (r.endNoteMode != CrossingNoteMode::Keep) return false;
+            if (r.endNoteMode != CrossingNoteMode::Keep || r.loopLengthTicks != 0 ||
+                r.quantize.active())
+                return false;
             if (r.sourceStartTick != sourceCursor) return false;
             sourceCursor = r.sourceEndTick;
         }
@@ -267,11 +351,13 @@ public:
                 sorted[i - 1].endTick() > sorted[i].startTick) return false;
         }
         _regions = incoming;
+        for (const auto &r : incoming) _managedTracks.insert(r.trackIndex);
         _nextId = highestId + 1;
         return true;
     }
 private:
     std::vector<MidiRegion> _regions;
+    std::set<int> _managedTracks;
     int _nextId = 1;
 };
 } // namespace xiv

@@ -10,6 +10,7 @@
 #include "MidiRegionModel.h"
 #include <algorithm>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace xiv {
@@ -38,12 +39,43 @@ struct RenderedRegionNote {
     // retrigger even when their timeline endpoints happen to touch.
     int sourceSliceStartTick = 0;
     int sourceSliceEndTick = 0;
+    int regionId = 0;
 };
+
+// Quantize relative to each instance's start. Keep the attack inside the
+// region, and preserve the note length except at explicit cut boundaries.
+inline void quantizeRegionNote(const MidiRegion &region, int64_t &start, int64_t &end) {
+    const auto &q = region.quantize;
+    if (!q.active()) return;
+
+    const int64_t relative = start - region.startTick;
+    const int64_t step = q.gridTicks;
+    const int64_t pairStart = relative / (2 * step) * (2 * step);
+    const int64_t swung = pairStart + (2 * step * q.swing + 50) / 100;
+    int64_t target = pairStart;
+    for (const int64_t candidate : {swung, pairStart + 2 * step}) {
+        const auto distance = candidate > relative ? candidate - relative : relative - candidate;
+        const auto best = target > relative ? target - relative : relative - target;
+        if (distance < best) target = candidate;
+    }
+    const int64_t delta = (target - relative) * q.strength;
+    const int64_t adjusted = std::clamp<int64_t>(
+        relative + (delta + (delta < 0 ? -50 : 50)) / 100,
+        0, region.duration() - 1);
+    const bool endsAtCut = region.endNoteMode != CrossingNoteMode::Keep &&
+                           end == region.endTick();
+    end += adjusted - relative;
+    start = region.startTick + adjusted;
+    if (endsAtCut) end = region.endTick();
+    if (region.endNoteMode != CrossingNoteMode::Keep)
+        end = std::min<int64_t>(end, region.endTick());
+    end = std::clamp<int64_t>(end, start + 1, std::numeric_limits<int>::max());
+}
 
 // Use the same model for arrangement previews and, once integrated, playback
 // and export. If a track has no regions, its notes remain unchanged. If it has
 // any regions, only source passages covered by those regions are included.
-inline std::vector<RenderedRegionNote> renderRegionNotes(
+inline std::vector<RenderedRegionNote> renderUnloopedRegionNotes(
     const std::vector<SourceRegionNote> &source,
     const MidiRegionModel &model) {
     std::vector<RenderedRegionNote> result;
@@ -82,19 +114,20 @@ inline std::vector<RenderedRegionNote> renderRegionNotes(
                         renderedEndSource = later.sourceStartTick;
                 }
             }
-            const int64_t outputStart = static_cast<int64_t>(region.startTick) +
+            int64_t outputStart = static_cast<int64_t>(region.startTick) +
                                         sourceStart - region.sourceStartTick;
-            const int64_t outputEnd = static_cast<int64_t>(region.startTick) +
+            int64_t outputEnd = static_cast<int64_t>(region.startTick) +
                                       renderedEndSource - region.sourceStartTick;
             if (outputEnd <= outputStart || outputStart < 0 ||
                 outputEnd > std::numeric_limits<int>::max()) continue;
+            quantizeRegionNote(region, outputStart, outputEnd);
             result.push_back({note.id, note.trackIndex,
                               static_cast<int>(outputStart),
                               static_cast<int>(outputEnd),
                               note.pitch, note.velocity, note.channel,
-                              sourceStart, renderedEndSource});
+                              sourceStart, renderedEndSource, region.id});
         }
-        if (!hasRegions) {
+        if (!hasRegions && !model.isManagedTrack(note.trackIndex)) {
             result.push_back({note.id, note.trackIndex, note.startTick,
                               note.endTick, note.pitch, note.velocity, note.channel,
                               note.startTick, note.endTick});
@@ -107,6 +140,55 @@ inline std::vector<RenderedRegionNote> renderRegionNotes(
         if (a.trackIndex != b.trackIndex) return a.trackIndex < b.trackIndex;
         return a.pitch < b.pitch;
     });
+    return result;
+}
+
+// Expand a loop into short-lived virtual regions. Every iteration uses the
+// SAME source notes; the final iteration may cover only part of the phrase.
+// Loop boundaries always retrigger notes instead of sustaining across cycles.
+inline std::vector<RenderedRegionNote> renderRegionNotes(
+    const std::vector<SourceRegionNote> &source,
+    const MidiRegionModel &model) {
+    bool hasLoops = false;
+    for (const auto &r : model.regions()) if (r.loopLengthTicks > 0) {
+        hasLoops = true; break;
+    }
+    if (!hasLoops) return renderUnloopedRegionNotes(source, model);
+    std::vector<MidiRegion> expanded;
+    std::unordered_map<int, int> realRegionId;
+    int nextId = 1;
+    int maxTrack = 0;
+    for (const auto &r : model.regions()) {
+        maxTrack = std::max(maxTrack, r.trackIndex);
+        if (r.loopLengthTicks == 0) {
+            MidiRegion instance = r;
+            instance.id = nextId++;
+            realRegionId[instance.id] = r.id;
+            expanded.push_back(instance);
+            continue;
+        }
+        const int baseLength = r.duration();
+        const int loops = 1 + (r.loopLengthTicks - 1) / baseLength;
+        for (int k = 0; k < loops; ++k) {
+            MidiRegion instance = r;
+            instance.id = nextId++;
+            realRegionId[instance.id] = r.id;
+            instance.startTick = r.startTick + k * baseLength;
+            instance.sourceEndTick = r.sourceStartTick +
+                std::min(baseLength, r.loopLengthTicks - k * baseLength);
+            instance.loopLengthTicks = 0;
+            if (k > 0) instance.startNoteMode = CrossingNoteMode::Split;
+            instance.endNoteMode = CrossingNoteMode::Shorten;
+            expanded.push_back(instance);
+        }
+    }
+    MidiRegionModel expandedModel = model;
+    if (!expandedModel.replaceValidated(expanded, maxTrack + 1)) return {};
+    auto result = renderUnloopedRegionNotes(source, expandedModel);
+    for (auto &note : result) {
+        const auto it = realRegionId.find(note.regionId);
+        if (it != realRegionId.end()) note.regionId = it->second;
+    }
     return result;
 }
 

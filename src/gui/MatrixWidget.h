@@ -20,6 +20,7 @@
 #define MATRIXWIDGET_H_
 
 // Project includes
+#include "../region/MidiRegionRender.h"
 #include "PaintWidget.h"
 #include "Appearance.h"
 #include "../midi/MidiTrack.h"
@@ -113,6 +114,11 @@ public:
         update();
     }
     MidiTrack *focusedTrack() const { return _focusedTrack; }
+    // Read-only rendered note projection from the selected MIDI region.
+    // Do not use source-event hit testing on moved/looped note positions.
+    void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
+                       bool showAllRegions, bool navigate = false);
+    void refreshRegionViewNotes();
 
     void setGMDrumLabelsVisible(bool show);
     bool gmDrumLabelsVisible() const { return _showGMDrumLabels; }
@@ -721,6 +727,12 @@ private:
     /** \brief Currently loaded MIDI file */
     MidiFile *file;
     MidiTrack *_focusedTrack = nullptr;
+    xiv::MidiRegionModel _regionViewModel;
+    std::vector<xiv::RenderedRegionNote> _regionViewNotes;
+    int _selectedViewRegionId = 0;
+    bool _regionViewEnabled = false;
+    bool _regionShowAll = false;
+    bool _regionEditingSafe = false;
     bool _showGMDrumLabels = false;
     bool _pitchRangeDragging = false;
     int _pitchRangeAnchor = -1;
