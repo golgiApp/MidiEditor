@@ -1,5 +1,8 @@
 # XIV MIDI Studio
 
+<img width="2544" height="1352" alt="image" src="https://github.com/user-attachments/assets/ee4be632-81df-4fd0-99f2-7656ecacfb74" />
+
+
 **Arrange like a producer with XIV MIDI Studio, a MIDI-focused digital audio workstation built for Final Fantasy XIV Bard Performance.**
 
 XIV MIDI Studio brings Meowchestra’s MidiEditor quality-of-life features into a redesigned workspace inspired by Logic Pro X, Ableton Live, and Soundtrap. Open a MIDI file, assign SoundFont instruments, arrange phrases across tracks, and edit their notes in the Piano Roll. When your arrangement is ready, export it as a standard MIDI file.
