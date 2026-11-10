@@ -585,6 +585,35 @@ MainWindow::MainWindow(QString initFile)
     auto *inspector = new QWidget(arrangementPane);
     inspector->setObjectName(QStringLiteral("xivInspector"));
     inspector->setFixedWidth(220);
+    inspector->setStyleSheet(QStringLiteral(R"(
+        QWidget#xivInspector QGroupBox {
+            color: #E8EFF8;
+            border: 1px solid #4A596A;
+            border-radius: 4px;
+            margin-top: 9px;
+            padding-top: 7px;
+        }
+        QWidget#xivInspector QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 3px;
+            color: #E8EFF8;
+        }
+        QWidget#xivInspector QToolButton {
+            color: #EDF5FF;
+            background: #344252;
+            border: 1px solid #526780;
+            border-radius: 4px;
+            padding: 3px 6px;
+        }
+        QWidget#xivInspector QToolButton:hover { background: #405673; }
+        QWidget#xivInspector QToolButton:checked { background: #235881; }
+        QWidget#xivInspector QToolButton:disabled {
+            color: #AAB7C7;
+            background: #282E37;
+            border-color: #435061;
+        }
+    )"));
     auto *inspectorLayout = new QVBoxLayout(inspector);
     inspectorLayout->setContentsMargins(8, 8, 8, 8);
 
@@ -1540,18 +1569,6 @@ MainWindow::MainWindow(QString initFile)
         }
     });
     transportRefresh->start(100);
-
-    auto *forceLegato = new QToolButton(pianoHeader);
-    forceLegato->setText(tr("Force Legato"));
-    forceLegato->setToolTip(tr("Set selected note ends 8 ticks before the next onset. "
-                               "The final onset extends to the region end."));
-    connect(forceLegato, &QToolButton::clicked, this, [this]() {
-        if (!mw_matrixWidget->forceLegatoRegionSelection())
-            statusBar()->showMessage(
-                tr("Force Legato made no changes. Select notes in a region with looping and quantization off."),
-                4000);
-    });
-    pianoHeaderLayout->addWidget(forceLegato);
 
     auto *noteTools = new QToolButton(pianoHeader);
     noteTools->setText(tr("Note Tools"));
@@ -2671,6 +2688,7 @@ void MainWindow::newFile() {
 
     // create new File
     MidiFile *f = new MidiFile();
+    f->track(1)->assignChannel(0);
 
     setFile(f);
 
@@ -3484,16 +3502,36 @@ void MainWindow::removeTrack(int tracknumber) {
     updateTrackMenu();
 }
 
+static bool channelUsedByAnotherTrack(MidiFile *file, MidiTrack *track, int channel) {
+    for (auto *other : *file->tracks())
+        if (other != track && other->assignedChannel() == channel) return true;
+    const auto *events = file->channelEvents(channel);
+    return std::any_of(events->cbegin(), events->cend(),
+        [track](MidiEvent *event) { return event->track() != track; });
+}
+
 void MainWindow::addTrack() {
     if (file) {
         TrackRenameDialog *d = new TrackRenameDialog(tr("New Track"), file->numTracks(), _settings, this);
         if (d->exec() == QDialog::Accepted && !d->name().isEmpty()) {
             file->protocol()->startNewAction("Add Track");
             file->addTrack();
-            file->tracks()->at(file->numTracks() - 1)->setName(d->name());
+            auto *track = file->tracks()->last();
+            int available = -1;
+            for (int ch = 0; ch < 16; ++ch) {
+                if (channelUsedByAnotherTrack(file, track, ch)) continue;
+                if (ch == 9) { available = ch; continue; }
+                available = ch;
+                break;
+            }
+            track->assignChannel(available);
+            track->setName(d->name());
             file->protocol()->endAction();
 
             updateTrackMenu();
+            editTrackAndChannel(track);
+            if (available < 0)
+                statusBar()->showMessage(tr("All MIDI channels are in use. Free a channel before routing this track."), 5000);
         }
     }
 }
@@ -4675,21 +4713,41 @@ void MainWindow::clearTrackEvents(MidiTrack *track) {
 }
 
 void MainWindow::moveTrackEventsToChannel(MidiTrack *track, int channel) {
-    if (!file || !track || channel < 0 || channel >= 16) return;
-    file->protocol()->startNewAction(tr("Move Track to Channel"));
-    for (int ch = 0; ch < 19; ch++) {
-        QMultiMap<int, MidiEvent *> *emap = file->channel(ch)->eventMap();
-        foreach(MidiEvent* ev, emap->values()) {
-            if (ev->track() == track) {
-                if (OnEvent *on = dynamic_cast<OnEvent *>(ev)) {
-                    on->moveToChannel(channel, false);
-                } else if (!dynamic_cast<OffEvent *>(ev)) {
-                    ev->setChannel(channel, false);
-                }
-            }
+    if (!file || !track || channel < 0 || channel >= 16 ||
+        MidiPlayer::isPlaying() || MidiInput::recording() ||
+        !file->tracks()->contains(track) || channelUsedByAnotherTrack(file, track, channel))
+        return;
+
+    QList<MidiEvent *> events;
+    bool hasInitialProgram = false;
+    for (int ch = 0; ch < 16; ++ch) {
+        const auto *map = file->channelEvents(ch);
+        for (auto it = map->cbegin(); it != map->cend(); ++it) {
+            auto *event = it.value();
+            if (event->track() != track || dynamic_cast<OffEvent *>(event)) continue;
+            if (it.key() == 0 && dynamic_cast<ProgChangeEvent *>(event)) hasInitialProgram = true;
+            if (ch != channel) events.append(event);
         }
     }
+    const int oldChannel = track->assignedChannel();
+    const int initialProgram = oldChannel >= 0 && oldChannel < 16
+        ? file->channel(oldChannel)->progAtTick(0) : 0;
+
+    file->protocol()->startNewAction(tr("Change Track MIDI Channel"));
+    if (_arrangementWidget)
+        _arrangementWidget->reassignRegionChannels(file->tracks()->indexOf(track), channel);
+    for (auto *event : events) {
+        auto *on = dynamic_cast<OnEvent *>(event);
+        if (on && !on->offEvent()) event->MidiEvent::moveToChannel(channel);
+        else event->moveToChannel(channel);
+    }
+    if (!hasInitialProgram && oldChannel >= 0 && oldChannel != channel)
+        file->channel(channel)->insertEvent(new ProgChangeEvent(channel, initialProgram, track), 0);
+    track->assignChannel(channel);
     file->protocol()->endAction();
+    if (_arrangementWidget && _arrangementWidget->regionViewChanged)
+        _arrangementWidget->regionViewChanged();
+    editTrackAndChannel(track);
     updateAll();
 }
 

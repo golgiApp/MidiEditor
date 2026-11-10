@@ -20,6 +20,7 @@
 #include "ColoredWidget.h"
 #include "Appearance.h"
 
+#include "../MidiEvent/MidiEvent.h"
 #include "../midi/MidiFile.h"
 #include "../midi/MidiTrack.h"
 #include "../midi/MidiChannel.h"
@@ -394,16 +395,26 @@ void TrackListWidget::showTrackContextMenu(MidiTrack *track, const QPoint &globa
     // Group 3: Selection & Content
     QAction *selectAllAction = menu.addAction(tr("Select All Events"));
     
-    QMenu *toChannelMenu = menu.addMenu(tr("Move Events to Channel..."));
-    for (int i = 0; i < 16; i++) {
-        QString instName;
-        if (i == 9) {
-            instName = tr("Percussion");
-        } else {
-            instName = MidiFile::instrumentName(file->channel(i)->progAtTick(0));
+    QMenu *toChannelMenu = menu.addMenu(tr("MIDI Channel"));
+    for (int channel = 0; channel < 16; ++channel) {
+        bool inUse = false;
+        for (auto *other : *file->tracks()) {
+            if (other != track && other->assignedChannel() == channel) {
+                inUse = true;
+                break;
+            }
         }
-        QAction *action = toChannelMenu->addAction(tr("Channel %1: %2").arg(i).arg(instName));
-        action->setData(i);
+        const auto *events = file->channelEvents(channel);
+        for (auto it = events->cbegin(); !inUse && it != events->cend(); ++it)
+            inUse = it.value()->track() != track;
+
+        QString label = tr("Channel %1").arg(channel + 1);
+        if (inUse) label += tr(" (in use)");
+        QAction *action = toChannelMenu->addAction(label);
+        action->setData(channel);
+        action->setCheckable(true);
+        action->setChecked(track->assignedChannel() == channel);
+        action->setEnabled(!inUse && !action->isChecked());
     }
 
     QAction *clearAction = menu.addAction(tr("Remove Events"));

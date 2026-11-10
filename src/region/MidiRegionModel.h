@@ -299,8 +299,10 @@ public:
     // Passing a source limit prevents extending into unbounded empty material.
     bool canTrimRight(int id, int newEndTick, int maxSourceTick) const {
         const MidiRegion *r = find(id);
-        if (!r || newEndTick <= r->startTick || maxSourceTick < r->sourceEndTick)
-            return false;
+        if (!r || newEndTick <= r->startTick) return false;
+        // Owned regions can grow into silence, including a newly created clip.
+        if (r->ownedNotes) maxSourceTick = std::numeric_limits<int>::max();
+        if (maxSourceTick < r->sourceEndTick) return false;
         const int64_t newSourceEnd = static_cast<int64_t>(r->sourceEndTick) +
                                      newEndTick - r->endTick();
         if (newSourceEnd <= r->sourceStartTick || newSourceEnd > maxSourceTick)

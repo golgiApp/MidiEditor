@@ -98,6 +98,19 @@ public:
     bool canEditQuantize() const {
         return _file && _regionsReady && !MidiPlayer::isPlaying() && !MidiInput::recording();
     }
+    // Called inside the track channel protocol action.
+    void reassignRegionChannels(int trackIndex, int channel) {
+        auto *before = _regionHistory.copy();
+        for (const auto &region : _regions.regions()) {
+            if (region.trackIndex != trackIndex || !region.ownedNotes) continue;
+            auto notes = *region.ownedNotes;
+            for (auto &note : notes) note.channel = channel;
+            _regions.replaceOwnedNotes(region.id, std::move(notes));
+        }
+        _regionTrackEditPendingSave = true;
+        _file->protocol()->enterUndoStep(new ProtocolItem(before, &_regionHistory));
+    }
+
     enum class QuantizeScope { Region, Track, Project };
     void applyQuantize(const xiv::RegionQuantize &settings,
                        QuantizeScope scope = QuantizeScope::Region) {
@@ -184,6 +197,7 @@ public:
         }
         _file = file;
         _selected = nullptr;
+        _emptyRegionButton = {};
         _preview.clear();
         _regions.clear();
         _regionsReady = false;
@@ -218,6 +232,7 @@ public:
                     [this]() { rebuildPreview(); });
         }
         rebuildPreview();
+        _lastSavedRegionChannels = assignedTrackChannels();
         refreshHorizontalRange();
         if (positionChanged) positionChanged(_playheadMs);
         if (regionViewChanged) regionViewChanged();
@@ -393,6 +408,7 @@ public:
         if (output.write(bytes) != bytes.size()) { output.cancelWriting(); return false; }
         if (!output.commit()) return false;
         _lastSavedRegionTracks = *_file->tracks();
+        _lastSavedRegionChannels = assignedTrackChannels();
         _regionTrackEditPendingSave = false;
         return true;
     }
@@ -403,7 +419,8 @@ protected:
         // handles transposition elsewhere.
         if (e->type() == QEvent::ShortcutOverride) {
             const auto *key = static_cast<QKeyEvent *>(e);
-            if ((_selectedRegionId && isSplitShortcut(key)) || isJoinShortcut(key)) {
+            if ((_selectedRegionId && isSplitShortcut(key)) || isJoinShortcut(key) ||
+                regionClipboardShortcut(key)) {
                 e->accept();
                 return true;
             }
@@ -412,6 +429,15 @@ protected:
     }
 
     void keyPressEvent(QKeyEvent *e) override {
+        if (regionClipboardShortcut(e)) {
+            if (!e->isAutoRepeat()) {
+                if (e->matches(QKeySequence::Copy)) copyRegion(_selectedRegionId);
+                else if (_file && _selected)
+                    pasteRegion(_file->tracks()->indexOf(_selected), snapTick(_file->cursorTick()));
+            }
+            e->accept();
+            return;
+        }
         if (isJoinShortcut(e)) {
             if (!e->isAutoRepeat()) joinSelectedRegions(_selectedRegionId);
             e->accept();
@@ -517,8 +543,10 @@ protected:
             p.setPen(QColor("#ACBACD"));
             // ASCII delimiters avoid mojibake on MSVC installations with a
             // legacy source character set (previously rendered as 'A' + junk).
-            p.drawText(14, y + 44, QStringLiteral("Track %1   |   Channel %2")
-                       .arg(i + 1).arg(t->assignedChannel() + 1));
+            const int channel = t->assignedChannel();
+            p.drawText(14, y + 44, tr("Track %1   |   Channel %2")
+                       .arg(i + 1).arg(channel >= 0 && channel < 16
+                            ? QString::number(channel + 1) : tr("Unassigned")));
 
             drawButton(p, instrumentRect(y), TrackControl::Instrument, false, QColor("#45647F"));
             drawButton(p, visibilityRect(y), TrackControl::Visibility, !t->hidden(), QColor("#1767A4"));
@@ -748,6 +776,16 @@ protected:
             }
             p.restore();
         }
+        if (!_emptyRegionButton.isEmpty() && canEditQuantize()) {
+            p.save();
+            p.setPen(QColor("#9BCDF1"));
+            p.setBrush(QColor("#345877"));
+            p.drawRoundedRect(_emptyRegionButton, 4, 4);
+            const QPoint center = _emptyRegionButton.center();
+            p.drawLine(center + QPoint(-4, 0), center + QPoint(4, 0));
+            p.drawLine(center + QPoint(0, -4), center + QPoint(0, 4));
+            p.restore();
+        }
         drawRuler(p, measureMarks, x);
     }
 
@@ -767,6 +805,10 @@ protected:
                 if (selectTrackRequested) selectTrackRequested(track);
                 if (regionViewChanged) regionViewChanged();
                 QMenu menu(this);
+                auto *copy = menu.addAction(tr("Copy Region"));
+                auto *paste = menu.addAction(tr("Paste Region Here"));
+                paste->setEnabled(_regionClipboard.duration > 0 && canEditQuantize());
+                menu.addSeparator();
                 QAction *join = menu.addAction(tr("Join Selected Regions Here") + QLatin1Char('\t') +
                     QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key_J)).toString(QKeySequence::NativeText));
                 join->setEnabled(_selectedRegionIds.size() > 1 && canEditQuantize());
@@ -788,11 +830,30 @@ protected:
                 QAction *deleteRegionAction = menu.addAction(tr("Delete Region (Backspace)"));
                 deleteRegionAction->setEnabled(!MidiPlayer::isPlaying());
                 QAction *chosen = menu.exec(e->globalPos());
-                if (chosen == join) joinSelectedRegions(id);
+                if (chosen == copy) copyRegion(id);
+                else if (chosen == paste) pasteRegion(row, tick);
+                else if (chosen == join) joinSelectedRegions(id);
                 else if (chosen == splitHere) splitRegion(id, tick);
                 else if (chosen == splitAtCursor) splitSelectedAtPlayhead();
                 else if (chosen == deleteRegionAction) deleteSelectedRegion();
                 update();
+                e->accept();
+                return;
+            }
+        }
+        if (_file && e->pos().x() >= headerWidth && isLaneY(e->pos().y())) {
+            const int row = (e->pos().y() - rulerHeight) / laneHeight;
+            if (row >= 0 && row < _file->numTracks()) {
+                const int tick = snapTick(timelineTickAt(e->pos().x()));
+                QMenu menu(this);
+                const int createTick = emptyRegionStartTick(row, e->pos().x());
+                auto *create = menu.addAction(tr("Add Empty Region Here"));
+                create->setEnabled(canEditQuantize() && emptyRegionDuration(row, createTick) > 0);
+                auto *paste = menu.addAction(tr("Paste Region Here"));
+                paste->setEnabled(_regionClipboard.duration > 0 && canEditQuantize());
+                QAction *chosen = menu.exec(e->globalPos());
+                if (chosen == create) addEmptyRegion(row, createTick);
+                else if (chosen == paste) pasteRegion(row, tick);
                 e->accept();
                 return;
             }
@@ -832,12 +893,21 @@ protected:
             return;
         }
         const QPoint pos = e->position().toPoint();
+        if (canEditQuantize() && _emptyRegionButton.contains(pos)) {
+            _emptyRegionButton = {};
+            setFocus(Qt::MouseFocusReason);
+            addEmptyRegion(_emptyRegionRow, _emptyRegionTick);
+            update();
+            e->accept();
+            return;
+        }
         if (inCycleStrip(pos)) {
             beginCycleDrag(pos.x());
             e->accept();
             return;
         }
         if (isLaneY(pos.y()) && pos.x() < headerWidth) {
+            setFocus(Qt::MouseFocusReason);
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
@@ -955,6 +1025,13 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
+        updateEmptyRegionHover(pos);
+        if (_emptyRegionButton.contains(pos)) {
+            setCursor(Qt::PointingHandCursor);
+            QToolTip::hideText();
+            e->accept();
+            return;
+        }
         if (_cycleDrag != CycleDrag::None) {
             updateCycleDrag(pos.x());
             e->accept();
@@ -1183,6 +1260,7 @@ private:
             if (widget) {
                 _regionsAtCapture = widget->_regions;
                 _tracksAtCapture = widget->_regionTracks;
+                _channelsAtCapture = widget->assignedTrackChannels();
                 _selectedAtCapture = widget->_selectedRegionId;
                 _selectionAtCapture = widget->_selectedRegionIds;
             }
@@ -1210,9 +1288,11 @@ private:
                 !std::equal(old->_tracksAtCapture.cbegin(), old->_tracksAtCapture.cend(),
                             tracks.cbegin()))) return;
             w->_regionTracks = old->_tracksAtCapture;
-            if (tracksChanging || tracks != w->_lastSavedRegionTracks)
+            if (tracksChanging || tracks != w->_lastSavedRegionTracks ||
+                old->_channelsAtCapture != w->_lastSavedRegionChannels ||
+                w->assignedTrackChannels() != w->_lastSavedRegionChannels)
                 w->_regionTrackEditPendingSave = true;
-            w->_regionHistoryRefreshPending = tracksChanging;
+            w->_regionHistoryRefreshPending = true;
             w->_regions = old->_regionsAtCapture;
             w->_selectedRegionId = old->_selectedAtCapture;
             w->_selectedRegionIds = old->_selectionAtCapture;
@@ -1228,7 +1308,6 @@ private:
             if (!w->_file->path().isEmpty() && QFileInfo::exists(w->_file->path()))
                 w->saveRegionLayout();
             w->update();
-            if (!tracksChanging && w->regionViewChanged) w->regionViewChanged();
         }
     private:
         ArrangementWidget *owner() const {
@@ -1238,6 +1317,7 @@ private:
         QPointer<MidiFile> _fileAtCapture;
         xiv::MidiRegionModel _regionsAtCapture;
         QList<MidiTrack *> _tracksAtCapture;
+        QList<int> _channelsAtCapture;
         int _selectedAtCapture = 0;
         std::set<int> _selectionAtCapture;
     };
@@ -1249,6 +1329,14 @@ private:
     bool _regionsReady = false;
     QList<MidiTrack *> _regionTracks;
     QList<MidiTrack *> _lastSavedRegionTracks;
+    QList<int> _lastSavedRegionChannels;
+    QList<int> assignedTrackChannels() const {
+        QList<int> result;
+        if (_file) {
+            for (auto *track : *_file->tracks()) result.append(track->assignedChannel());
+        }
+        return result;
+    }
     bool _regionTrackEditPendingSave = false;
     bool _regionHistoryRefreshPending = false;
     int _selectedRegionId = 0;
@@ -1715,6 +1803,119 @@ private:
         setSelectedTrack(track);
         if (selectTrackRequested) selectTrackRequested(track);
         if (regionViewChanged) regionViewChanged();
+    }
+
+    xiv::RegionClipboard _regionClipboard;
+
+    bool regionClipboardShortcut(const QKeyEvent *event) const {
+        return (_selectedRegionId && event->matches(QKeySequence::Copy)) ||
+               (_selected && _regionClipboard.duration > 0 && event->matches(QKeySequence::Paste));
+    }
+
+    void copyRegion(int id) {
+        auto snapshot = _regions;
+        if (!captureRegion(snapshot, id)) return;
+        const auto *region = snapshot.find(id);
+        _regionClipboard = {region->duration(), *region->ownedNotes};
+    }
+
+    QRect _emptyRegionButton;
+    int _emptyRegionRow = -1;
+    int _emptyRegionTick = 0;
+
+    void leaveEvent(QEvent *event) override {
+        _emptyRegionButton = {};
+        update();
+        QWidget::leaveEvent(event);
+    }
+
+    void updateEmptyRegionHover(const QPoint &pos) {
+        if (canEditQuantize() && !_timelinePressed && !_regionPressed &&
+            _cycleDrag == CycleDrag::None && pos.x() >= headerWidth &&
+            width() - headerWidth >= 20 && isLaneY(pos.y())) {
+            const int row = (pos.y() - rulerHeight) / laneHeight;
+            if (row >= 0 && row < _file->numTracks() && !hitRegion(row, pos.x()) &&
+                height() - (_rulerTop + rulerHeight) >= 19) {
+                if (_emptyRegionButton.contains(pos)) return;
+                const int tick = emptyRegionStartTick(row, pos.x());
+                if (emptyRegionDuration(row, tick) > 0) {
+                    _emptyRegionRow = row;
+                    _emptyRegionTick = tick;
+                    _emptyRegionButton = QRect(std::clamp(pos.x() - 9, headerWidth, width() - 19),
+                        std::clamp(pos.y() - 9, _rulerTop + rulerHeight, height() - 19), 19, 19);
+                    update();
+                    return;
+                }
+            }
+        }
+        if (_emptyRegionButton.isEmpty()) return;
+        _emptyRegionButton = {};
+        update();
+    }
+
+    int emptyRegionStartTick(int track, int x) const {
+        const int raw = timelineTickAt(x);
+        const int snapped = snapTick(raw);
+        // Keep the start in the hovered gap even when it is shorter than the grid.
+        for (const auto &region : _regions.regions()) {
+            if (region.trackIndex == track &&
+                std::min(raw, snapped) < region.endTick() &&
+                std::max(raw, snapped) >= region.startTick)
+                return raw;
+        }
+        return snapped;
+    }
+
+    int emptyRegionDuration(int track, int tick) const {
+        int64_t end = tick;
+        int boundary = tick;
+        for (int i = 0; i < 4; ++i) {
+            int measureStart = 0, measureEnd = 0;
+            _file->measure(boundary, &measureStart, &measureEnd);
+            if (measureEnd <= boundary || measureEnd <= measureStart) break;
+            end += static_cast<int64_t>(measureEnd) - measureStart;
+            if (end >= std::numeric_limits<int>::max()) {
+                end = std::numeric_limits<int>::max();
+                break;
+            }
+            boundary = measureEnd;
+        }
+        return xiv::emptyRegionGapDuration(_regions, track, tick, static_cast<int>(end));
+    }
+
+    void addEmptyRegion(int track, int tick) {
+        if (!canEditQuantize() || track < 0 || track >= _file->numTracks()) return;
+        const int duration = emptyRegionDuration(track, tick);
+        if (duration > 0)
+            insertRegion(track, tick, {duration, {}}, tr("Add Empty Region"));
+    }
+
+    void pasteRegion(int track, int tick) {
+        insertRegion(track, tick, _regionClipboard, tr("Paste Region"));
+    }
+
+    void insertRegion(int trackIndex, int tick, const xiv::RegionClipboard &clip,
+                      const QString &description) {
+        if (!canEditQuantize() || trackIndex < 0 || trackIndex >= _file->numTracks()) return;
+        MidiTrack *track = _file->tracks()->at(trackIndex);
+        int channel = track->assignedChannel();
+        // A note-free region can also be created on an unassigned track.
+        if (clip.notes.empty() && (channel < 0 || channel >= 16)) channel = 0;
+        auto updated = _regions;
+        const int id = xiv::insertOwnedRegion(updated, trackIndex, tick,
+                                               _file->numTracks(), clip, channel);
+        if (!id) {
+            QToolTip::showText(QCursor::pos(), tr("Choose a track with a MIDI channel and a valid timeline position."), this);
+            return;
+        }
+
+        auto *before = _regionHistory.copy();
+        _regions = std::move(updated);
+        _selectedRegionId = id;
+        _selectedRegionIds = {id};
+        setSelectedTrack(track);
+        if (selectTrackRequested) selectTrackRequested(track);
+        finishRegionEdit(before, description);
     }
 
     void transferRegions(const std::set<int> &ids, int primary, int track, int start,

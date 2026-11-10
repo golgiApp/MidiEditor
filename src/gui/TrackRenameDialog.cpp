@@ -92,6 +92,10 @@ TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber
     _nameEdit = new QLineEdit(currentName, this);
     _nameEdit->setPlaceholderText(tr("Enter track name..."));
     _nameEdit->setFixedHeight(30);
+    _nameEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { color:#F4F8FF; background:#26313D; border:1px solid #526780; "
+        "border-radius:4px; padding:3px 6px; selection-background-color:#316B9E; "
+        "selection-color:#FFFFFF; } QLineEdit:focus { border-color:#71B4EA; }"));
     _nameEdit->selectAll();
     mainLayout->addWidget(_nameEdit);
 

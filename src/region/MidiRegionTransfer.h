@@ -10,6 +10,39 @@ inline bool validRegionDestination(int track, int start, int64_t end, int trackC
            end <= std::numeric_limits<int>::max();
 }
 
+inline int emptyRegionGapDuration(const MidiRegionModel &model, int track, int start, int limit) {
+    if (start < 0 || limit <= start || model.at(track, start)) return 0;
+    for (const auto &region : model.regions()) {
+        if (region.trackIndex == track && region.startTick > start)
+            limit = std::min(limit, region.startTick);
+    }
+    return limit - start;
+}
+
+struct RegionClipboard {
+    int duration = 0;
+    std::vector<OwnedRegionNote> notes;
+};
+
+inline int insertOwnedRegion(MidiRegionModel &model, int track, int start, int trackCount,
+                             const RegionClipboard &clip, int channel) {
+    const int64_t end = static_cast<int64_t>(start) + clip.duration;
+    if (clip.duration <= 0 || !validRegionDestination(track, start, end, trackCount) ||
+        channel < 0 || channel >= 16) return 0;
+    auto notes = clip.notes;
+    for (auto &note : notes) {
+        if (static_cast<int64_t>(start) + note.endTick > std::numeric_limits<int>::max())
+            return 0;
+        note.channel = channel;
+    }
+    if (!validOwnedNotes(notes)) return 0;
+
+    const int id = model.addInitial(track, 0, clip.duration);
+    model.move(id, start);
+    model.replaceOwnedNotes(id, std::move(notes));
+    return id;
+}
+
 // Capture the audible note positions before removing anything. The resulting
 // region owns its notes independently of the original tracks and transforms.
 inline bool consolidateRegions(MidiRegionModel &model, const std::set<int> &ids,

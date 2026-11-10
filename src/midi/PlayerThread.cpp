@@ -290,11 +290,14 @@ bool PlayerThread::sendEventsBetween(int startMs, int endMs) {
 
     while (it != events->end() && it.key() < endMs) {
         // save events for the given tick
-        QList<MidiEvent *> onEv, offEv;
+        QList<MidiEvent *> onEv, offEv, noteAttacks;
         int sendPosition = it.key();
 
         do {
-            if (it.value()->isOnEvent()) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (note && note->velocity() > 0) {
+                noteAttacks.append(note);
+            } else if (it.value()->isOnEvent()) {
                 onEv.append(it.value());
             } else {
                 offEv.append(it.value());
@@ -305,6 +308,8 @@ bool PlayerThread::sendEventsBetween(int startMs, int endMs) {
         foreach(MidiEvent* ev, offEv) {
             sendTrackEvent(ev);
         }
+        // Apply channel state before attacks at the same timestamp.
+        onEv.append(noteAttacks);
         foreach(MidiEvent* ev, onEv) {
             if (ev->line() == MidiEvent::KEY_SIGNATURE_EVENT_LINE) {
                 KeySignatureEvent *keySig = dynamic_cast<KeySignatureEvent *>(ev);
@@ -319,9 +324,12 @@ bool PlayerThread::sendEventsBetween(int startMs, int endMs) {
                 }
             }
             
-            ProgChangeEvent *p = dynamic_cast<ProgChangeEvent *>(ev);
-            if (p && p->channel() >= 0 && p->channel() < 16) {
-                currentChannelProgram[p->channel()] = p->program();
+            if (auto *program = dynamic_cast<ProgChangeEvent *>(ev)) {
+                auto *track = program->track();
+                auto *solo = file->soloTrack();
+                if (program->channel() >= 0 && program->channel() < 16 &&
+                    (!track || (!track->muted() && (!solo || solo == track))))
+                    currentChannelProgram[program->channel()] = program->program();
             }
 
             if (AdditionalMidiSettingsWidget::trackBasedProgramChanges()) {
