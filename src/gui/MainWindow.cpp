@@ -972,29 +972,6 @@ MainWindow::MainWindow(QString initFile)
                                  top + (ArrangementWidget::rulerHeight - trackHeaderActions->height()) / 2);
     };
     trackHeaderActions->setFixedSize(trackHeaderActions->sizeHint());
-    auto *rulerZoom = new QWidget(_arrangementWidget);
-    auto *rulerZoomLayout = new QHBoxLayout(rulerZoom);
-    rulerZoomLayout->setContentsMargins(0, 0, 0, 0);
-    rulerZoomLayout->setSpacing(4);
-    rulerZoom->setStyleSheet(trackHeaderActions->styleSheet());
-    for (bool zoomIn : {false, true}) {
-        auto *button = new QToolButton(rulerZoom);
-        button->setIcon(Appearance::adjustIconForDarkMode(zoomIn
-            ? QStringLiteral(":/run_environment/graphics/tool/zoom_hor_in.png")
-            : QStringLiteral(":/run_environment/graphics/tool/zoom_hor_out.png")));
-        button->setIconSize(QSize(16, 16));
-        button->setFixedSize(28, 24);
-        const QString label = zoomIn ? tr("Zoom in on Arrangement") : tr("Zoom out of Arrangement");
-        button->setToolTip(label);
-        button->setAccessibleName(label);
-        connect(button, &QToolButton::clicked, _arrangementWidget, [this, zoomIn]() {
-            _arrangementWidget->zoomTimeline(zoomIn);
-        });
-        rulerZoomLayout->addWidget(button);
-    }
-    rulerZoom->setFixedSize(rulerZoom->sizeHint());
-    _arrangementWidget->setRulerZoomControls(rulerZoom);
-
     auto *trackScrollBar = arrangementArea->verticalScrollBar();
     connect(trackScrollBar, &QScrollBar::valueChanged, _arrangementWidget, pinTrackHeader);
     pinTrackHeader(trackScrollBar->value());
@@ -1319,6 +1296,23 @@ MainWindow::MainWindow(QString initFile)
     auto *fixChannelsButton = addControl(_fixXIVChannelsTracksAction);
     fixChannelsButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     bar->addStretch(1);
+    for (bool zoomIn : {false, true}) {
+        auto *button = new QToolButton(controlBar);
+        button->setIcon(Appearance::adjustIconForDarkMode(zoomIn
+            ? QStringLiteral(":/run_environment/graphics/tool/zoom_hor_in.png")
+            : QStringLiteral(":/run_environment/graphics/tool/zoom_hor_out.png")));
+        button->setIconSize(QSize(21, 21));
+        button->setFixedSize(36, 34);
+        const QString label = zoomIn ? tr("Zoom in on Arrangement") : tr("Zoom out of Arrangement");
+        button->setToolTip(label);
+        button->setAccessibleName(label);
+        connect(button, &QToolButton::clicked, _arrangementWidget, [this, zoomIn]() {
+            _arrangementWidget->zoomTimeline(zoomIn);
+        });
+        bar->addWidget(button);
+    }
+    bar->addSpacing(24);
+
     // MIDI stores the meter denominator as a power of two (2 means /4).
     const auto meterAt = [](MidiFile *document, int tick, int &numerator) {
         int exponent = 2;

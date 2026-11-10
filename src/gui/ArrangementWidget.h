@@ -148,11 +148,6 @@ public:
         finishRegionEdit(before, description);
     }
 
-    void setRulerZoomControls(QWidget *controls) {
-        _rulerZoom = controls;
-        positionRulerZoom();
-    }
-
     void zoomTimeline(bool zoomIn) {
         if (!_file) return;
         zoomTimelineAt(zoomIn, headerWidth + std::max(0, width() - headerWidth) / 2);
@@ -161,7 +156,6 @@ public:
     void setRulerTop(int top) {
         if (top == _rulerTop) return;
         _rulerTop = top;
-        positionRulerZoom();
         update();
     }
 
@@ -361,7 +355,6 @@ protected:
     }
     void resizeEvent(QResizeEvent *event) override {
         QWidget::resizeEvent(event);
-        positionRulerZoom();
         refreshHorizontalRange();
     }
 
@@ -1078,15 +1071,6 @@ private:
     int _selectedRegionId = 0;
 
     int _rulerTop = 0;
-    QPointer<QWidget> _rulerZoom;
-
-    void positionRulerZoom() {
-        if (!_rulerZoom) return;
-        const int left = width() - _rulerZoom->width() - 5;
-        _rulerZoom->setVisible(left > headerWidth);
-        _rulerZoom->move(left, _rulerTop + (rulerHeight - _rulerZoom->height()) / 2);
-    }
-
     void zoomTimelineAt(bool zoomIn, int x) {
         x = std::clamp(x, headerWidth, std::max(headerWidth, width()));
         const double anchorMs = _originMs + (x - headerWidth) / _scale;
@@ -1112,8 +1096,7 @@ private:
         p.setPen(QColor("#515966"));
         p.drawLine(0, rulerHeight - 1, width(), rulerHeight - 1);
         p.drawLine(headerWidth, 0, headerWidth, rulerHeight);
-        const int right = _rulerZoom && !_rulerZoom->isHidden() ? _rulerZoom->x() - 4 : width();
-        p.setClipRect(QRect(headerWidth, 0, std::max(0, right - headerWidth), rulerHeight));
+        p.setClipRect(QRect(headerWidth, 0, std::max(0, width() - headerWidth), rulerHeight));
         p.setPen(QColor("#C4CCD9"));
         if (!_file)
             p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, rulerHeight),
