@@ -1495,7 +1495,7 @@ void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
     // Existing native edit tools remain enabled where their source note
     // positions still equal the arranged display. Transformed/looped regions
     // need dedicated region-note IDs before editing may safely be enabled.
-    _regionEditingSafe = !_regionShowAll && focusedRegion &&
+    _regionEditingSafe = !_regionShowAll && focusedRegion && !focusedRegion->ownedNotes &&
         focusedRegion->startTick == focusedRegion->sourceStartTick &&
         focusedRegion->loopLengthTicks == 0 && !focusedRegion->quantize.active() &&
         focusedRegion->endNoteMode == xiv::CrossingNoteMode::Keep &&

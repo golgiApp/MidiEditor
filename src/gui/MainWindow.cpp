@@ -1144,11 +1144,6 @@ MainWindow::MainWindow(QString initFile)
 
     setCentralWidget(central);
 
-    // Keep the old customizable editing toolbar available on demand.
-    if (!_settings->value("xiv/compact_control_bar_initialized", false).toBool()) {
-        Appearance::setToolbarVisible(false);
-        _settings->setValue("xiv/compact_control_bar_initialized", true);
-    }
     QWidget *buttons = setupActions(central);
     if (auto *editingToolbar = _actionMap.value("show_toolbar")) {
         editingToolbar->setText(tr("Show Editing Toolbar"));

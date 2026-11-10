@@ -286,7 +286,7 @@ public:
         if (path.trimmed().isEmpty() || !QFileInfo::exists(path)) return false;
         QJsonObject root;
         root.insert(QStringLiteral("format"), QStringLiteral("XIV Midi Studio regions"));
-        root.insert(QStringLiteral("version"), 1);
+        int version = 1;
         root.insert(QStringLiteral("tracks"), _file->tracks()->size());
         QJsonArray items;
         for (const xiv::MidiRegion &r : _regions.regions()) {
@@ -302,8 +302,17 @@ public:
             entry.insert(QStringLiteral("quantizeGridTicks"), r.quantize.gridTicks);
             entry.insert(QStringLiteral("quantizeStrength"), r.quantize.strength);
             entry.insert(QStringLiteral("quantizeSwing"), r.quantize.swing);
+            if (r.ownedNotes) {
+                version = 2;
+                QJsonArray notes;
+                for (const auto &note : *r.ownedNotes)
+                    notes.append(QJsonArray{note.id, note.startTick, note.endTick,
+                                            note.pitch, note.velocity, note.channel});
+                entry.insert(QStringLiteral("ownedNotes"), notes);
+            }
             items.append(entry);
         }
+        root.insert(QStringLiteral("version"), version);
         root.insert(QStringLiteral("regions"), items);
         QJsonArray managed;
         for (int track : _regions.managedTracks()) managed.append(track);
@@ -424,7 +433,6 @@ protected:
             drawButton(p, actionsRect(y), QStringLiteral("More..."), false, QColor("#55748E"));
 
             const auto &notes = _preview[t];
-            if (notes.isEmpty()) continue;
             // Draw region backgrounds first; note previews are rendered later
             // from the same region schedule as playback and arranged export.
             for (const auto &region : _regions.regions()) {
@@ -490,10 +498,13 @@ protected:
                 if (n.endTick <= n.beginTick) continue;
                 sourceNotes.push_back({previewId++, i, n.beginTick, n.endTick,
                                        n.pitch, 100, 0});
-                lowestPitch = std::min(lowestPitch, n.pitch);
-                highestPitch = std::max(highestPitch, n.pitch);
             }
-            if (!sourceNotes.empty()) {
+            const auto renderedNotes = xiv::renderRegionNotes(sourceNotes, _regions, i);
+            if (!renderedNotes.empty()) {
+                for (const auto &note : renderedNotes) {
+                    lowestPitch = std::min(lowestPitch, note.pitch);
+                    highestPitch = std::max(highestPitch, note.pitch);
+                }
                 const int pitchRange = std::max(1, highestPitch - lowestPitch);
                 QColor previewAccent = c.isValid() ? c : QColor("#7EA4D4");
                 int h = 0, s = 0, l = 0, a = 255;
@@ -507,7 +518,7 @@ protected:
                                     laneHeight - 4));
                 p.setPen(Qt::NoPen);
                 p.setBrush(previewAccent.lighter(145));
-                for (const auto &note : xiv::renderRegionNotes(sourceNotes, _regions)) {
+                for (const auto &note : renderedNotes) {
                     const int sx = std::max(headerWidth + 4,
                         xForMs(_file->msOfTick(note.startTick)));
                     const int ex = std::min(width() - 3,
@@ -1101,7 +1112,12 @@ private:
         const int sourceCut = region->sourceStartTick + tick - region->startTick;
         xiv::CrossingNoteMode choice = xiv::CrossingNoteMode::Shorten;
         bool hasCrossingNotes = false;
-        if (region->trackIndex >= 0 && region->trackIndex < _file->tracks()->size()) {
+        if (region->ownedNotes) {
+            hasCrossingNotes = std::any_of(region->ownedNotes->begin(), region->ownedNotes->end(),
+                [sourceCut](const auto &note) {
+                    return note.startTick < sourceCut && sourceCut < note.endTick;
+                });
+        } else if (region->trackIndex >= 0 && region->trackIndex < _file->tracks()->size()) {
             MidiTrack *track = _file->tracks()->at(region->trackIndex);
             const auto &notes = _preview.value(track);
             for (const auto &note : notes) {
@@ -1239,9 +1255,10 @@ private:
         const QJsonDocument doc = QJsonDocument::fromJson(input.readAll(), &error);
         if (error.error != QJsonParseError::NoError || !doc.isObject()) return;
         const QJsonObject root = doc.object();
+        const int version = root.value(QStringLiteral("version")).toInt();
         if (root.value(QStringLiteral("format")).toString() !=
                 QStringLiteral("XIV Midi Studio regions") ||
-            root.value(QStringLiteral("version")).toInt() != 1 ||
+            (version != 1 && version != 2) ||
             root.value(QStringLiteral("tracks")).toInt(-1) != _file->tracks()->size()) return;
         const QJsonValue jsonRegions = root.value(QStringLiteral("regions"));
         if (!jsonRegions.isArray()) return;
@@ -1274,6 +1291,21 @@ private:
                                 {o.value(QStringLiteral("quantizeGridTicks")).toInt(0),
                                  o.value(QStringLiteral("quantizeStrength")).toInt(100),
                                  o.value(QStringLiteral("quantizeSwing")).toInt(50)}});
+            const auto storedNotes = o.value(QStringLiteral("ownedNotes"));
+            if (storedNotes.isUndefined()) continue;
+            if (version != 2 || !storedNotes.isArray()) return;
+            std::vector<xiv::OwnedRegionNote> notes;
+            const QJsonArray rows = storedNotes.toArray();
+            notes.reserve(static_cast<std::size_t>(rows.size()));
+            for (const auto &row : rows) {
+                const QJsonArray values = row.toArray();
+                if (values.size() != 6) return;
+                notes.push_back({values.at(0).toInt(-1), values.at(1).toInt(-1),
+                                 values.at(2).toInt(-1), values.at(3).toInt(-1),
+                                 values.at(4).toInt(-1), values.at(5).toInt(-1)});
+            }
+            incoming.back().ownedNotes =
+                std::make_shared<const std::vector<xiv::OwnedRegionNote>>(std::move(notes));
         }
         const int trackCount = _file->tracks()->size();
         const auto storedManaged = root.value(QStringLiteral("managedTracks"));

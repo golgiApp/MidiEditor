@@ -20,13 +20,13 @@
 
 #include "OffEvent.h"
 
-NoteOnEvent::NoteOnEvent(int note, int velocity, int ch, MidiTrack *track)
+NoteOnEvent::NoteOnEvent(int note, int velocity, int ch, MidiTrack *track, bool autoPair)
     : OnEvent(ch, track) {
     _note = note;
     _velocity = velocity;
     // has to be done here because the line is not known in OnEvents constructor
     // before
-    OffEvent::enterOnEvent(this);
+    if (autoPair) OffEvent::enterOnEvent(this);
 }
 
 NoteOnEvent::NoteOnEvent(NoteOnEvent &other)

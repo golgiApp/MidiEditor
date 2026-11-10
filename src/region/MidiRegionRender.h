@@ -40,6 +40,7 @@ struct RenderedRegionNote {
     int sourceSliceStartTick = 0;
     int sourceSliceEndTick = 0;
     int regionId = 0;
+    int ownedNoteId = 0;
 };
 
 // Quantize relative to each instance's start. Keep the attack inside the
@@ -77,60 +78,71 @@ inline void quantizeRegionNote(const MidiRegion &region, int64_t &start, int64_t
 // any regions, only source passages covered by those regions are included.
 inline std::vector<RenderedRegionNote> renderUnloopedRegionNotes(
     const std::vector<SourceRegionNote> &source,
-    const MidiRegionModel &model) {
+    const MidiRegionModel &model, int trackFilter = -1) {
     std::vector<RenderedRegionNote> result;
+    const auto appendNote = [&result, &model](const SourceRegionNote &note,
+                                               const MidiRegion &region, int ownedId) {
+        const int sourceStart = std::max(note.startTick, region.sourceStartTick);
+        const int sourceEnd = std::min(note.endTick, region.sourceEndTick);
+        if (sourceEnd <= sourceStart) return;
+
+        // A source note already sounding when this right-hand region begins
+        // is not retriggered for Keep or Shorten. With Split, its remaining
+        // source portion becomes a separate note at the new region start.
+        if (note.startTick < region.sourceStartTick &&
+            region.startNoteMode != CrossingNoteMode::Split) return;
+
+        int renderedEndSource = sourceEnd;
+        if (note.endTick > region.sourceEndTick &&
+            region.endNoteMode == CrossingNoteMode::Keep) {
+            // Keep preserves the note's natural release, even if another
+            // region is subsequently moved. A later explicit Split or
+            // Shorten boundary can still cut the held note downstream.
+            renderedEndSource = note.endTick;
+            for (const auto &later : model.regions()) {
+                if (ownedId || later.trackIndex != note.trackIndex ||
+                    later.sourceStartTick <= region.sourceEndTick ||
+                    later.sourceStartTick >= renderedEndSource ||
+                    later.startNoteMode == CrossingNoteMode::Keep) continue;
+                // An ordinary clone of earlier material must not truncate
+                // the continuous note merely because it has a source start.
+                if (later.sourceStartTick > region.sourceEndTick)
+                    renderedEndSource = later.sourceStartTick;
+            }
+        }
+        int64_t outputStart = static_cast<int64_t>(region.startTick) +
+                                    sourceStart - region.sourceStartTick;
+        int64_t outputEnd = static_cast<int64_t>(region.startTick) +
+                                  renderedEndSource - region.sourceStartTick;
+        if (outputEnd <= outputStart || outputStart < 0 ||
+            outputEnd > std::numeric_limits<int>::max()) return;
+        quantizeRegionNote(region, outputStart, outputEnd);
+        result.push_back({note.id, note.trackIndex,
+                          static_cast<int>(outputStart),
+                          static_cast<int>(outputEnd),
+                          note.pitch, note.velocity, note.channel,
+                          sourceStart, renderedEndSource, region.id, ownedId});
+    };
     for (const auto &note : source) {
-        if (note.startTick < 0 || note.endTick <= note.startTick ||
+        if ((trackFilter >= 0 && note.trackIndex != trackFilter) || note.startTick < 0 || note.endTick <= note.startTick ||
             note.trackIndex < 0 || note.id <= 0) continue;
         bool hasRegions = false;
         for (const auto &region : model.regions()) {
             if (region.trackIndex != note.trackIndex) continue;
             hasRegions = true;
-            const int sourceStart = std::max(note.startTick, region.sourceStartTick);
-            const int sourceEnd = std::min(note.endTick, region.sourceEndTick);
-            if (sourceEnd <= sourceStart) continue;
-
-            // A source note already sounding when this right-hand region begins
-            // is not retriggered for Keep or Shorten. With Split, its remaining
-            // source portion becomes a separate note at the new region start.
-            if (note.startTick < region.sourceStartTick &&
-                region.startNoteMode != CrossingNoteMode::Split) continue;
-
-            int renderedEndSource = sourceEnd;
-            if (note.endTick > region.sourceEndTick &&
-                region.endNoteMode == CrossingNoteMode::Keep) {
-                // Keep preserves the note's natural release, even if another
-                // region is subsequently moved. A later explicit Split or
-                // Shorten boundary can still cut the held note downstream.
-                renderedEndSource = note.endTick;
-                for (const auto &later : model.regions()) {
-                    if (later.trackIndex != note.trackIndex ||
-                        later.sourceStartTick <= region.sourceEndTick ||
-                        later.sourceStartTick >= renderedEndSource ||
-                        later.startNoteMode == CrossingNoteMode::Keep) continue;
-                    // An ordinary clone of earlier material must not truncate
-                    // the continuous note merely because it has a source start.
-                    if (later.sourceStartTick > region.sourceEndTick)
-                        renderedEndSource = later.sourceStartTick;
-                }
-            }
-            int64_t outputStart = static_cast<int64_t>(region.startTick) +
-                                        sourceStart - region.sourceStartTick;
-            int64_t outputEnd = static_cast<int64_t>(region.startTick) +
-                                      renderedEndSource - region.sourceStartTick;
-            if (outputEnd <= outputStart || outputStart < 0 ||
-                outputEnd > std::numeric_limits<int>::max()) continue;
-            quantizeRegionNote(region, outputStart, outputEnd);
-            result.push_back({note.id, note.trackIndex,
-                              static_cast<int>(outputStart),
-                              static_cast<int>(outputEnd),
-                              note.pitch, note.velocity, note.channel,
-                              sourceStart, renderedEndSource, region.id});
+            if (!region.ownedNotes) appendNote(note, region, 0);
         }
         if (!hasRegions && !model.isManagedTrack(note.trackIndex)) {
             result.push_back({note.id, note.trackIndex, note.startTick,
                               note.endTick, note.pitch, note.velocity, note.channel,
                               note.startTick, note.endTick});
+        }
+    }
+    for (const auto &region : model.regions()) {
+        if (!region.ownedNotes || (trackFilter >= 0 && region.trackIndex != trackFilter)) continue;
+        for (const auto &note : *region.ownedNotes) {
+            appendNote({0, region.trackIndex, note.startTick, note.endTick,
+                        note.pitch, note.velocity, note.channel}, region, note.id);
         }
     }
     // Adjacent split fragments are deliberately NOT merged here: a note
@@ -148,12 +160,12 @@ inline std::vector<RenderedRegionNote> renderUnloopedRegionNotes(
 // Loop boundaries always retrigger notes instead of sustaining across cycles.
 inline std::vector<RenderedRegionNote> renderRegionNotes(
     const std::vector<SourceRegionNote> &source,
-    const MidiRegionModel &model) {
+    const MidiRegionModel &model, int trackFilter = -1) {
     bool hasLoops = false;
     for (const auto &r : model.regions()) if (r.loopLengthTicks > 0) {
         hasLoops = true; break;
     }
-    if (!hasLoops) return renderUnloopedRegionNotes(source, model);
+    if (!hasLoops) return renderUnloopedRegionNotes(source, model, trackFilter);
     std::vector<MidiRegion> expanded;
     std::unordered_map<int, int> realRegionId;
     int nextId = 1;
@@ -184,7 +196,7 @@ inline std::vector<RenderedRegionNote> renderRegionNotes(
     }
     MidiRegionModel expandedModel = model;
     if (!expandedModel.replaceValidated(expanded, maxTrack + 1)) return {};
-    auto result = renderUnloopedRegionNotes(source, expandedModel);
+    auto result = renderUnloopedRegionNotes(source, expandedModel, trackFilter);
     for (auto &note : result) {
         const auto it = realRegionId.find(note.regionId);
         if (it != realRegionId.end()) note.regionId = it->second;

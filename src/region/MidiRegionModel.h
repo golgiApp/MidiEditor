@@ -14,6 +14,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <utility>
 #include <set>
 #include <vector>
 
@@ -45,6 +47,29 @@ struct RegionQuantize {
     }
 };
 
+struct OwnedRegionNote {
+    int id;
+    // Use the region's source coordinate space so trimming is reversible.
+    int startTick;
+    int endTick;
+    int pitch;
+    int velocity;
+    int channel;
+
+    bool valid() const {
+        return id > 0 && startTick >= 0 && endTick > startTick &&
+               pitch >= 0 && pitch < 128 && velocity > 0 && velocity < 128 &&
+               channel >= 0 && channel < 16;
+    }
+};
+
+inline bool validOwnedNotes(const std::vector<OwnedRegionNote> &notes) {
+    std::set<int> ids;
+    return std::all_of(notes.begin(), notes.end(), [&ids](const auto &note) {
+        return note.valid() && ids.insert(note.id).second;
+    });
+}
+
 struct MidiRegion {
     int id = 0;
     int trackIndex = 0;
@@ -59,6 +84,9 @@ struct MidiRegion {
     // extend the region with full or partial repeats of its original source.
     int loopLengthTicks = 0;
     RegionQuantize quantize{};
+    // Null uses track source notes. An allocated empty list means silence.
+    // Replacing the immutable list makes editing a duplicate independent.
+    std::shared_ptr<const std::vector<OwnedRegionNote>> ownedNotes{};
 
     int duration() const { return sourceEndTick - sourceStartTick; }
     int displayDuration() const { return loopLengthTicks > 0 ? loopLengthTicks : duration(); }
@@ -105,6 +133,15 @@ public:
         return _managedTracks.count(trackIndex) != 0;
     }
     const std::set<int> &managedTracks() const { return _managedTracks; }
+    bool replaceOwnedNotes(int id, std::vector<OwnedRegionNote> notes) {
+        if (!validOwnedNotes(notes)) return false;
+        for (auto &region : _regions) {
+            if (region.id != id) continue;
+            region.ownedNotes = std::make_shared<const std::vector<OwnedRegionNote>>(std::move(notes));
+            return true;
+        }
+        return false;
+    }
     bool setQuantize(int id, const RegionQuantize &settings) {
         if (!settings.valid()) return false;
         for (auto &region : _regions) {
@@ -184,7 +221,7 @@ public:
             r.endNoteMode = behavior;
             const int newId = _nextId++;
             _regions.push_back({newId, r.trackIndex, timelineTick, sourceSplit,
-                                oldEnd, behavior, previousEndMode, 0, r.quantize});
+                                oldEnd, behavior, previousEndMode, 0, r.quantize, r.ownedNotes});
             return newId;
         }
         return 0;
@@ -235,7 +272,7 @@ public:
         _regions.push_back({newId, source.trackIndex, newStartTick,
                             source.sourceStartTick, source.sourceEndTick,
                             source.startNoteMode, source.endNoteMode,
-                            source.loopLengthTicks, source.quantize});
+                            source.loopLengthTicks, source.quantize, source.ownedNotes});
         return newId;
     }
     // Trim the left boundary while preserving the source/timeline offset.
@@ -305,7 +342,7 @@ public:
         std::vector<MidiRegion> track;
         for (const auto &r : _regions) {
             if (r.trackIndex == trackIndex) {
-                if (r.startTick != r.sourceStartTick) return false;
+                if (r.ownedNotes || r.startTick != r.sourceStartTick) return false;
                 track.push_back(r);
             }
         }
@@ -332,8 +369,11 @@ public:
         std::vector<int> ids;
         ids.reserve(incoming.size());
         int highestId = 0;
+        std::set<const std::vector<OwnedRegionNote> *> checkedNoteLists;
         for (const auto &r : incoming) {
             if (!r.valid() || r.trackIndex >= trackCount || r.id > 100000000) return false;
+            if (r.ownedNotes && checkedNoteLists.insert(r.ownedNotes.get()).second &&
+                !validOwnedNotes(*r.ownedNotes)) return false;
             ids.push_back(r.id);
             highestId = std::max(highestId, r.id);
         }

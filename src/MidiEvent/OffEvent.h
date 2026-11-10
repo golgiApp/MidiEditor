@@ -52,7 +52,7 @@ public:
      * \param line The display line for this event
      * \param track The MIDI track this event belongs to
      */
-    OffEvent(int ch, int line, MidiTrack *track);
+    OffEvent(int ch, int line, MidiTrack *track, bool autoPair = true);
 
     /**
      * \brief Creates a new OffEvent copying another instance.

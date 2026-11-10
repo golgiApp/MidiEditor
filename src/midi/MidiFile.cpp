@@ -1572,12 +1572,22 @@ void MidiFile::buildRenderedNoteEvents(QMultiMap<int, MidiEvent *> &destination,
         }
     }
     for (const auto &note : xiv::renderRegionNotes(source, _regionLayout)) {
-        auto *original = byId.value(note.sourceId, nullptr);
-        if (!original || !original->offEvent()) continue;
-        // Copy each on/off event together. The source event's protocol and
-        // note pairing remain untouched so region Undo/Redo stays lossless.
-        auto *on = new NoteOnEvent(*original);
-        auto *off = new OffEvent(*original->offEvent());
+        NoteOnEvent *on;
+        OffEvent *off;
+        if (note.ownedNoteId) {
+            MidiTrack *track = _tracks->at(note.trackIndex);
+            if (!track) continue;
+            // Detached events must stay out of the parser's pairing registry.
+            on = new NoteOnEvent(note.pitch, note.velocity, note.channel, track, false);
+            off = new OffEvent(note.channel, on->line(), track, false);
+            on->setFile(track->file());
+            off->setFile(track->file());
+        } else {
+            auto *original = byId.value(note.sourceId, nullptr);
+            if (!original || !original->offEvent()) continue;
+            on = new NoteOnEvent(*original);
+            off = new OffEvent(*original->offEvent());
+        }
         off->setOnEvent(on);
         on->setDetachedMidiTime(note.startTick);
         off->setDetachedMidiTime(note.endTick);
