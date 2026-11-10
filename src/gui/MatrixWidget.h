@@ -121,6 +121,7 @@ public:
     void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
                        bool showAllRegions, bool navigate = false);
     void refreshRegionViewNotes();
+    bool forceLegatoRegionSelection();
 
     void setGMDrumLabelsVisible(bool show);
     bool gmDrumLabelsVisible() const { return _showGMDrumLabels; }
@@ -738,7 +739,7 @@ private:
     bool _showMidiEventLanes = false;
     int lastVisibleLine() const { return _showMidiEventLanes ? NUM_LINES : 128; }
     bool _regionEditingSafe = false;
-    enum class RegionGesture { None, Select, Move, ResizeLeft, ResizeRight, Add };
+    enum class RegionGesture { None, Select, Move, ResizeLeft, ResizeRight, Add, NoteMenu };
     RegionGesture _regionGesture = RegionGesture::None;
     QPoint _regionPressPoint;
     std::set<int> _regionSelection;
@@ -755,6 +756,7 @@ private:
     bool beginRegionGesture(QMouseEvent *event);
     void updateRegionGesture(const QPoint &point);
     void endRegionGesture(QMouseEvent *event);
+    bool adjustSelectedRegionNoteEnds(bool overlapsOnly);
     bool deleteRegionSelection();
     bool _showGMDrumLabels = false;
     bool _pitchRangeDragging = false;

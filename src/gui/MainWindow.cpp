@@ -1541,6 +1541,18 @@ MainWindow::MainWindow(QString initFile)
     });
     transportRefresh->start(100);
 
+    auto *forceLegato = new QToolButton(pianoHeader);
+    forceLegato->setText(tr("Force Legato"));
+    forceLegato->setToolTip(tr("Set selected note ends 8 ticks before the next onset. "
+                               "The final onset extends to the region end."));
+    connect(forceLegato, &QToolButton::clicked, this, [this]() {
+        if (!mw_matrixWidget->forceLegatoRegionSelection())
+            statusBar()->showMessage(
+                tr("Force Legato made no changes. Select notes in a region with looping and quantization off."),
+                4000);
+    });
+    pianoHeaderLayout->addWidget(forceLegato);
+
     auto *noteTools = new QToolButton(pianoHeader);
     noteTools->setText(tr("Note Tools"));
     noteTools->setPopupMode(QToolButton::InstantPopup);
@@ -1983,7 +1995,7 @@ void MainWindow::record() {
             // _matrixWidgetContainer->setEnabled(false);
             _trackWidget->setEnabled(false);
             eventWidget()->setEnabled(false);
-            MidiPlayer::play(file);
+            MidiPlayer::play(file, true);
             MidiInput::startInput();
             connect(MidiPlayer::playerThread(), SIGNAL(playerStopped()), this, SLOT(stop()));
             // Connect playback cursor updates for all platforms (not just Windows)

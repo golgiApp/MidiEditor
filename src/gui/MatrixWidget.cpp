@@ -22,6 +22,7 @@
 #endif
 
 #include "MatrixWidget.h"
+#include "../region/RegionForceLegato.h"
 #include "../MidiEvent/MidiEvent.h"
 #include <iterator>
 #include "../MidiEvent/NoteOnEvent.h"
@@ -1619,6 +1620,19 @@ bool MatrixWidget::beginRegionGesture(QMouseEvent *event) {
                 tr("Turn off region quantization or remove the loop extension to edit these notes."), this);
         return true;
     }
+    if (event->button() == Qt::RightButton &&
+        !event->modifiers().testFlag(Qt::ControlModifier)) {
+        const auto selectedNote = std::find_if(_regionViewNotes.begin(), _regionViewNotes.end(),
+            [this, &point](const auto &note) {
+                const int id = note.ownedNoteId ? note.ownedNoteId : note.sourceId;
+                return _regionSelection.count(id) && regionNoteRect(note).contains(point);
+            });
+        if (selectedNote != _regionViewNotes.end()) {
+            _regionGesture = RegionGesture::NoteMenu;
+            _regionGestureButton = Qt::RightButton;
+            return true;
+        }
+    }
     const auto *tool = Tool::currentTool();
     if (!dynamic_cast<const StandardTool *>(tool) && !dynamic_cast<const NewNoteTool *>(tool) &&
         !dynamic_cast<const SelectTool *>(tool)) return true;
@@ -1752,6 +1766,24 @@ void MatrixWidget::endRegionGesture(QMouseEvent *event) {
     }
     commitRegionNotes(region->id, std::move(notes),
         gesture == RegionGesture::Move ? tr("Move Region Notes") : tr("Resize Region Notes"));
+}
+
+bool MatrixWidget::forceLegatoRegionSelection() {
+    return adjustSelectedRegionNoteEnds(false);
+}
+
+bool MatrixWidget::adjustSelectedRegionNoteEnds(bool overlapsOnly) {
+    const auto *region = editableRegion();
+    if (!region || _regionSelection.empty()) return false;
+
+    auto notes = regionNotesForEdit(*region);
+    const auto mode = overlapsOnly ? xiv::RegionNoteEndMode::RemoveOverlap
+                                   : xiv::RegionNoteEndMode::Legato;
+    if (!xiv::adjustRegionNoteEnds(notes, _regionViewNotes, _regionSelection,
+                                   region->sourceEndTick, mode)) return false;
+    commitRegionNotes(region->id, std::move(notes),
+                      overlapsOnly ? tr("Remove Note Overlaps") : tr("Force Legato"));
+    return true;
 }
 
 bool MatrixWidget::deleteRegionSelection() {
@@ -2260,6 +2292,18 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
+    if (_regionGesture == RegionGesture::NoteMenu && event->button() == Qt::RightButton) {
+        _regionGesture = RegionGesture::None;
+        _regionGestureButton = Qt::NoButton;
+        event->accept();
+        QMenu menu(this);
+        QAction *legato = menu.addAction(tr("Force Legato"));
+        QAction *overlap = menu.addAction(tr("Remove Overlaps (8 Ticks)"));
+        QAction *chosen = menu.exec(event->globalPosition().toPoint());
+        if (chosen == legato) forceLegatoRegionSelection();
+        else if (chosen == overlap) adjustSelectedRegionNoteEnds(true);
+        return;
+    }
     if (_regionGesture != RegionGesture::None && event->button() == _regionGestureButton) {
         endRegionGesture(event);
         event->accept();

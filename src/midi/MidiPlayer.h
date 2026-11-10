@@ -64,7 +64,7 @@ public:
      * \brief Starts playback of a MIDI file.
      * \param file The MidiFile to play
      */
-    static void play(MidiFile *file);
+    static void play(MidiFile *file, bool recording = false);
 
     /**
      * \brief Plays a single note event for preview.

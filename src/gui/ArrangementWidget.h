@@ -56,6 +56,7 @@
 
 #include "../midi/MidiFile.h"
 #include "../midi/MidiPlayer.h"
+#include "../midi/PlayerThread.h"
 #include "../midi/MidiInput.h"
 #include "../midi/MidiTrack.h"
 #include "../midi/MidiChannel.h"
@@ -175,6 +176,12 @@ public:
     static constexpr int laneHeight = 84;
 
     void setFile(MidiFile *file) {
+        if (_file != file) {
+            _cycle = {};
+            _cycleEnabled = false;
+            _cycleDrag = CycleDrag::None;
+            publishCycle();
+        }
         _file = file;
         _selected = nullptr;
         _preview.clear();
@@ -321,6 +328,7 @@ public:
             _regionsReady = true;
         }
         _file->setRegionLayout(_regions);
+        publishCycle();
         setMinimumHeight(std::max(130, rulerHeight + count * laneHeight));
         updateGeometry();
         refreshHorizontalRange();
@@ -824,6 +832,11 @@ protected:
             return;
         }
         const QPoint pos = e->position().toPoint();
+        if (inCycleStrip(pos)) {
+            beginCycleDrag(pos.x());
+            e->accept();
+            return;
+        }
         if (isLaneY(pos.y()) && pos.x() < headerWidth) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
@@ -942,6 +955,21 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
+        if (_cycleDrag != CycleDrag::None) {
+            updateCycleDrag(pos.x());
+            e->accept();
+            return;
+        }
+        if (inCycleStrip(pos) && !_timelinePressed && !_regionPressed) {
+            const auto hit = cycleHit(pos.x());
+            setCursor(hit == CycleDrag::Left || hit == CycleDrag::Right
+                ? Qt::SizeHorCursor : hit == CycleDrag::Move ? Qt::OpenHandCursor : Qt::CrossCursor);
+            QToolTip::showText(e->globalPosition().toPoint(),
+                tr("Cycle playback: drag to draw or move the range, drag an edge to resize, click the ribbon to toggle."),
+                this);
+            e->accept();
+            return;
+        }
         int hoverTick = -1, hoverRow = -1;
         if (_file && pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
@@ -1050,6 +1078,22 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && _cycleDrag != CycleDrag::None) {
+            updateCycleDrag(int(e->position().x()));
+            if (_cycleMoved && _cycleDraft.active() &&
+                _file->msOfTick(_cycleDraft.end) > _file->msOfTick(_cycleDraft.start)) {
+                _cycle = _cycleDraft;
+                if (_cycleDrag == CycleDrag::Draw) _cycleEnabled = true;
+            } else if (!_cycleMoved && _cycleDrag != CycleDrag::Draw) {
+                _cycleEnabled = !_cycleEnabled;
+            }
+            _cycleDrag = CycleDrag::None;
+            publishCycle();
+            unsetCursor();
+            update();
+            e->accept();
+            return;
+        }
         if (e->button() == Qt::LeftButton && _regionPressed) {
             const bool drag = _regionDragging;
             const int id = _moveRegionId;
@@ -1223,6 +1267,72 @@ private:
     }
 
 
+    enum class CycleDrag { None, Draw, Move, Left, Right };
+    static constexpr int cycleStripHeight = 12;
+    xiv::PlaybackCycle _cycle, _cycleDraft;
+    CycleDrag _cycleDrag = CycleDrag::None;
+    bool _cycleEnabled = false;
+    bool _cycleMoved = false;
+    int _cycleAnchorX = 0;
+    int _cycleAnchorTick = 0;
+
+    bool inCycleStrip(const QPoint &pos) const {
+        return _file && pos.x() >= headerWidth &&
+               pos.y() >= _rulerTop && pos.y() < _rulerTop + cycleStripHeight;
+    }
+
+    void publishCycle() const {
+        if (_file && _cycleEnabled) {
+            PlayerThread::setCycleRange({_file->msOfTick(_cycle.start),
+                                         _file->msOfTick(_cycle.end)});
+        } else {
+            PlayerThread::setCycleRange({});
+        }
+    }
+
+    CycleDrag cycleHit(int x) const {
+        if (!_cycle.active()) return CycleDrag::Draw;
+        const int left = xForMs(_file->msOfTick(_cycle.start));
+        const int right = xForMs(_file->msOfTick(_cycle.end));
+        if (std::abs(x - left) <= 4 && std::abs(x - left) <= std::abs(x - right))
+            return CycleDrag::Left;
+        if (std::abs(x - right) <= 4) return CycleDrag::Right;
+        return x >= left && x < right ? CycleDrag::Move : CycleDrag::Draw;
+    }
+
+    void beginCycleDrag(int x) {
+        _cycleDrag = cycleHit(x);
+        _cycleAnchorX = x;
+        _cycleAnchorTick = snapTick(timelineTickAt(x));
+        _cycleDraft = _cycle;
+        _cycleMoved = false;
+        QToolTip::hideText();
+    }
+
+    void updateCycleDrag(int x) {
+        if (!_cycleMoved && std::abs(x - _cycleAnchorX) < QApplication::startDragDistance())
+            return;
+        _cycleMoved = true;
+        const int tick = snapTick(timelineTickAt(std::clamp(x, headerWidth, width())));
+        switch (_cycleDrag) {
+        case CycleDrag::Draw:
+            _cycleDraft = {std::min(tick, _cycleAnchorTick), std::max(tick, _cycleAnchorTick)};
+            break;
+        case CycleDrag::Move: {
+            const int duration = _cycle.end - _cycle.start;
+            const auto start = std::clamp<int64_t>(
+                static_cast<int64_t>(_cycle.start) + tick - _cycleAnchorTick,
+                0, std::numeric_limits<int>::max() - duration);
+            _cycleDraft = {static_cast<int>(start), static_cast<int>(start) + duration};
+            break;
+        }
+        case CycleDrag::Left: _cycleDraft.start = std::min(tick, _cycle.end - 1); break;
+        case CycleDrag::Right: _cycleDraft.end = std::max(tick, _cycle.start + 1); break;
+        case CycleDrag::None: break;
+        }
+        update();
+    }
+
     bool isLaneY(int y) const { return y >= _rulerTop + rulerHeight; }
 
     void drawRuler(QPainter &p, const QVector<QPair<int, int>> &marks, int playheadX) const {
@@ -1237,19 +1347,41 @@ private:
         p.drawLine(0, rulerHeight - 1, width(), rulerHeight - 1);
         p.drawLine(headerWidth, 0, headerWidth, rulerHeight);
         p.setClipRect(QRect(headerWidth, 0, std::max(0, width() - headerWidth), rulerHeight));
+        if (_file) {
+            p.fillRect(headerWidth, 0, width() - headerWidth, cycleStripHeight, QColor("#1E2229"));
+            const auto range = _cycleMoved && _cycleDrag != CycleDrag::None ? _cycleDraft : _cycle;
+            if (range.active()) {
+                const int left = xForMs(_file->msOfTick(range.start));
+                const int right = xForMs(_file->msOfTick(range.end));
+                const QRect ribbon(left, 1, std::max(2, right - left), cycleStripHeight - 2);
+                const bool enabled = _cycleEnabled || (_cycleMoved && _cycleDrag == CycleDrag::Draw);
+                p.fillRect(ribbon, enabled ? QColor("#E7A536") : QColor("#59472A"));
+                p.setPen(enabled ? QColor("#FFD386") : QColor("#9B7B42"));
+                p.drawRect(ribbon.adjusted(0, 0, -1, -1));
+                p.drawLine(ribbon.left() + 2, 3, ribbon.left() + 2, cycleStripHeight - 4);
+                p.drawLine(ribbon.right() - 2, 3, ribbon.right() - 2, cycleStripHeight - 4);
+            } else {
+                p.setFont(QFont(QStringLiteral("Segoe UI"), 7));
+                p.setPen(QColor("#C4A36B"));
+                p.drawText(QRect(headerWidth + 6, 0, width() - headerWidth - 6, cycleStripHeight),
+                           Qt::AlignVCenter, tr("Drag to set Cycle"));
+                p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+            }
+        }
         p.setPen(QColor("#C4CCD9"));
         if (!_file)
             p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, rulerHeight),
                        Qt::AlignVCenter, tr("Open a MIDI file"));
         for (const auto &mark : marks)
-            p.drawText(mark.first + 5, 20, QString::number(mark.second));
+            p.drawText(mark.first + 5, 27, QString::number(mark.second));
         if (playheadX >= headerWidth && playheadX < width()) {
             p.setPen(QPen(QColor("#FFDD75"), 2));
-            p.drawLine(playheadX, 15, playheadX, rulerHeight);
+            p.drawLine(playheadX, cycleStripHeight + 8, playheadX, rulerHeight);
             p.setPen(Qt::NoPen);
             p.setBrush(QColor("#FFDD75"));
-            p.drawPolygon(QPolygon{QPoint(playheadX - 7, 4), QPoint(playheadX + 7, 4),
-                                   QPoint(playheadX, 16)});
+            p.drawPolygon(QPolygon{QPoint(playheadX - 5, cycleStripHeight),
+                                   QPoint(playheadX + 5, cycleStripHeight),
+                                   QPoint(playheadX, cycleStripHeight + 9)});
         }
         p.restore();
     }

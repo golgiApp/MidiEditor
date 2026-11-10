@@ -31,9 +31,13 @@
 #include <QMultiMap>
 #include <QElapsedTimer>
 #include <QByteArray>
+#include <algorithm>
+#include <limits>
 
 #define INTERVAL_TIME 15
 #define TIMEOUTS_PER_SIGNAL 1
+
+std::atomic<std::uint64_t> PlayerThread::cycleBounds{0};
 
 PlayerThread::PlayerThread()
     : QThread() {
@@ -43,8 +47,19 @@ PlayerThread::PlayerThread()
     time = 0;
 }
 
-void PlayerThread::setFile(MidiFile *f) {
+void PlayerThread::setFile(MidiFile *f, int startMs, bool recording) {
     file = f;
+    position = startMs;
+    recordingPlayback = recording;
+    stopped = false;
+}
+
+void PlayerThread::setCycleRange(xiv::PlaybackCycle range) {
+    cycleBounds.store(range.packed());
+}
+
+xiv::PlaybackCycle PlayerThread::cycleRange() {
+    return xiv::PlaybackCycle::unpack(cycleBounds.load());
 }
 
 void PlayerThread::stop() {
@@ -57,9 +72,8 @@ void PlayerThread::setInterval(int i) {
 
 void PlayerThread::run() {
     activeTrackNotes.clear();
-    if (!timer) {
-        timer = new QTimer();
-    }
+    QTimer playbackTimer;
+    timer = &playbackTimer;
     if (time) {
         delete time;
         time = 0;
@@ -67,14 +81,34 @@ void PlayerThread::run() {
 
     events = file->playerData();
 
-    if (file->pauseTick() >= 0) {
-        position = file->msOfTick(file->pauseTick());
-    } else {
-        position = file->msOfTick(file->cursorTick());
-    }
-
     emit playerStarted();
+    restorePlaybackState(position.load(), false);
 
+    setInterval(INTERVAL_TIME);
+
+    connect(timer, SIGNAL(timeout()), this, SLOT(timeout()), Qt::DirectConnection);
+    timer->start(INTERVAL_TIME);
+
+    QList<TimeSignatureEvent *> *list = 0;
+
+    int tickInMeasure = 0;
+    const int tick = file->tick(position.load());
+    measure = file->measure(tick, tick, &list, &tickInMeasure);
+    emit(measureChanged(measure, tickInMeasure));
+
+    exec();
+    timer->stop();
+    timer = nullptr;
+    delete time;
+    time = nullptr;
+    emit playerStopped();
+}
+
+void PlayerThread::restorePlaybackState(int startMs, bool rewind) {
+    if (rewind) {
+        MidiPlayer::panic();
+        MidiOutput::resetChannelPrograms();
+    }
     // Reset all Controllers
     for (int i = 0; i < 16; i++) {
         QByteArray array;
@@ -91,10 +125,12 @@ void PlayerThread::run() {
         currentChannelProgram[i] = -1;
     }
 
-    // All Events before position should be sent, progChanges and ControlChanges
+    // Chase channel and meter state without playing notes before the range.
+    TimeSignatureEvent *lastMeter = nullptr;
+    KeySignatureEvent *lastKey = nullptr;
     QMultiMap<int, MidiEvent *>::iterator it = events->begin();
     while (it != events->end()) {
-        if (it.key() >= position) {
+        if (it.key() >= startMs) {
             break;
         }
         
@@ -103,31 +139,20 @@ void PlayerThread::run() {
             currentChannelProgram[p->channel()] = p->program();
         }
         
-        // Program/controller state initialization is still sent as before.
-        // Never trigger a muted track's note-on when seeking.
-        if (!dynamic_cast<NoteOnEvent *>(it.value())) {
+        if (auto *meter = dynamic_cast<TimeSignatureEvent *>(it.value())) {
+            lastMeter = meter;
+        } else if (auto *key = dynamic_cast<KeySignatureEvent *>(it.value())) {
+            lastKey = key;
+        } else if (!dynamic_cast<NoteOnEvent *>(it.value()) &&
+                   !dynamic_cast<OffEvent *>(it.value()) &&
+                   it.value()->channel() >= 0 && it.value()->channel() < 16) {
             MidiOutput::sendCommand(it.value());
         }
         it++;
     }
 
-    setInterval(INTERVAL_TIME);
-
-    connect(timer, SIGNAL(timeout()), this, SLOT(timeout()), Qt::DirectConnection);
-    timer->start(INTERVAL_TIME);
-
-    stopped = false;
-
-    QList<TimeSignatureEvent *> *list = 0;
-
-    int tickInMeasure = 0;
-    measure = file->measure(file->cursorTick(), file->cursorTick(), &list, &tickInMeasure);
-    emit(measureChanged(measure, tickInMeasure));
-
-    if (exec() == 0) {
-        timer->stop();
-        emit playerStopped();
-    }
+    if (lastMeter) emit meterChanged(lastMeter->num(), lastMeter->denom());
+    if (lastKey) emit tonalityChanged(lastKey->tonality());
 }
 
 void PlayerThread::silenceMutedTracks() {
@@ -197,7 +222,6 @@ void PlayerThread::timeout() {
 
     disconnect(timer, SIGNAL(timeout()), this, SLOT(timeout()));
     if (stopped) {
-        disconnect(timer, SIGNAL(timeout()), this, SLOT(timeout()));
 
         // AllNotesOff // All SoundsOff
         for (int i = 0; i < 16; i++) {
@@ -220,97 +244,106 @@ void PlayerThread::timeout() {
             }
         }
         quit();
+        return;
     } else {
         // A mute/solo click is honored on the next 15 ms audio scheduling tick.
         silenceMutedTracks();
-        int newPos = position + time->elapsed() * MidiPlayer::speedScale();
-        int tick = file->tick(newPos);
-        QList<TimeSignatureEvent *> *list = 0;
-        int ickInMeasure = 0;
-
-        int new_measure = file->measure(tick, tick, &list, &ickInMeasure);
-
-        // compute current pos
-
-        if (new_measure > measure) {
-            emit measureChanged(new_measure, ickInMeasure);
-            measure = new_measure;
+        const int previous = position.load();
+        const double elapsed = time->restart() * MidiPlayer::speedScale();
+        const int newPos = static_cast<int>(std::clamp(previous + elapsed,
+            0.0, static_cast<double>(std::numeric_limits<int>::max())));
+        const auto cycle = recordingPlayback ? xiv::PlaybackCycle{} : cycleRange();
+        int next = newPos;
+        const bool wrapped = cycle.active() && newPos >= cycle.end;
+        bool atEnd;
+        if (wrapped) {
+            if (previous < cycle.end) sendEventsBetween(previous, cycle.end);
+            restorePlaybackState(cycle.start, true);
+            next = cycle.wrap(previous, newPos);
+            atEnd = sendEventsBetween(cycle.start, next);
+        } else {
+            atEnd = sendEventsBetween(previous, next);
         }
-        time->restart();
-        QMultiMap<int, MidiEvent *>::iterator it = events->lowerBound(position);
+        if (atEnd && !cycle.active() && !MidiInput::recording()) stop();
 
-        while (it != events->end() && it.key() < newPos) {
-            // save events for the given tick
-            QList<MidiEvent *> onEv, offEv;
-            int sendPosition = it.key();
-
-            do {
-                if (it.value()->isOnEvent()) {
-                    onEv.append(it.value());
-                } else {
-                    offEv.append(it.value());
-                }
-                it++;
-            } while (it != events->end() && it.key() == sendPosition);
-
-            foreach(MidiEvent* ev, offEv) {
-                sendTrackEvent(ev);
-            }
-            foreach(MidiEvent* ev, onEv) {
-                if (ev->line() == MidiEvent::KEY_SIGNATURE_EVENT_LINE) {
-                    KeySignatureEvent *keySig = dynamic_cast<KeySignatureEvent *>(ev);
-                    if (keySig) {
-                        emit tonalityChanged(keySig->tonality());
-                    }
-                }
-                if (ev->line() == MidiEvent::TIME_SIGNATURE_EVENT_LINE) {
-                    TimeSignatureEvent *timeSig = dynamic_cast<TimeSignatureEvent *>(ev);
-                    if (timeSig) {
-                        emit meterChanged(timeSig->num(), timeSig->denom());
-                    }
-                }
-                
-                ProgChangeEvent *p = dynamic_cast<ProgChangeEvent *>(ev);
-                if (p && p->channel() >= 0 && p->channel() < 16) {
-                    currentChannelProgram[p->channel()] = p->program();
-                }
-
-                if (AdditionalMidiSettingsWidget::trackBasedProgramChanges()) {
-                    NoteOnEvent *n = dynamic_cast<NoteOnEvent *>(ev);
-                    if (n && n->track() && !n->track()->muted() &&
-                        (!file->soloTrack() || file->soloTrack() == n->track()) &&
-                        n->channel() >= 0 && n->channel() < 16) {
-                        int prog = n->track()->progAtTick(n->midiTime());
-                        if (currentChannelProgram[n->channel()] != prog) {
-                            MidiOutput::sendProgram(n->channel(), prog);
-                            currentChannelProgram[n->channel()] = prog;
-                        }
-                    }
-                }
-                
-                sendTrackEvent(ev);
-            }
-
-            //MidiOutput::sendCommand(it.value());
-            //it++;
+        const int tick = file->tick(next);
+        QList<TimeSignatureEvent *> *list = nullptr;
+        int tickInMeasure = 0;
+        const int nextMeasure = file->measure(tick, tick, &list, &tickInMeasure);
+        if (wrapped || nextMeasure != measure) {
+            measure = nextMeasure;
+            emit measureChanged(measure, tickInMeasure);
         }
-
-        // end if it was last event, but only if not recording
-        if (it == events->end() && !MidiInput::recording()) {
-            stop();
-        }
-        position = newPos;
-        timeoutSinceLastSignal++;
-        MidiInput::setTime(position);
-        if (timeoutSinceLastSignal == TIMEOUTS_PER_SIGNAL) {
-            emit timeMsChanged(position);
-            emit measureUpdate(measure, ickInMeasure);
+        position = next;
+        MidiInput::setTime(next);
+        if (++timeoutSinceLastSignal == TIMEOUTS_PER_SIGNAL) {
+            emit timeMsChanged(next);
+            emit measureUpdate(measure, tickInMeasure);
             timeoutSinceLastSignal = 0;
         }
     }
     connect(timer, SIGNAL(timeout()), this, SLOT(timeout()), Qt::DirectConnection);
 }
 
+bool PlayerThread::sendEventsBetween(int startMs, int endMs) {
+    QMultiMap<int, MidiEvent *>::iterator it = events->lowerBound(startMs);
+
+    while (it != events->end() && it.key() < endMs) {
+        // save events for the given tick
+        QList<MidiEvent *> onEv, offEv;
+        int sendPosition = it.key();
+
+        do {
+            if (it.value()->isOnEvent()) {
+                onEv.append(it.value());
+            } else {
+                offEv.append(it.value());
+            }
+            it++;
+        } while (it != events->end() && it.key() == sendPosition);
+
+        foreach(MidiEvent* ev, offEv) {
+            sendTrackEvent(ev);
+        }
+        foreach(MidiEvent* ev, onEv) {
+            if (ev->line() == MidiEvent::KEY_SIGNATURE_EVENT_LINE) {
+                KeySignatureEvent *keySig = dynamic_cast<KeySignatureEvent *>(ev);
+                if (keySig) {
+                    emit tonalityChanged(keySig->tonality());
+                }
+            }
+            if (ev->line() == MidiEvent::TIME_SIGNATURE_EVENT_LINE) {
+                TimeSignatureEvent *timeSig = dynamic_cast<TimeSignatureEvent *>(ev);
+                if (timeSig) {
+                    emit meterChanged(timeSig->num(), timeSig->denom());
+                }
+            }
+            
+            ProgChangeEvent *p = dynamic_cast<ProgChangeEvent *>(ev);
+            if (p && p->channel() >= 0 && p->channel() < 16) {
+                currentChannelProgram[p->channel()] = p->program();
+            }
+
+            if (AdditionalMidiSettingsWidget::trackBasedProgramChanges()) {
+                NoteOnEvent *n = dynamic_cast<NoteOnEvent *>(ev);
+                if (n && n->track() && !n->track()->muted() &&
+                    (!file->soloTrack() || file->soloTrack() == n->track()) &&
+                    n->channel() >= 0 && n->channel() < 16) {
+                    int prog = n->track()->progAtTick(n->midiTime());
+                    if (currentChannelProgram[n->channel()] != prog) {
+                        MidiOutput::sendProgram(n->channel(), prog);
+                        currentChannelProgram[n->channel()] = prog;
+                    }
+                }
+            }
+            
+            sendTrackEvent(ev);
+        }
+
+    }
+    return it == events->end();
+}
+
 int PlayerThread::timeMs() {
-    return position;
+    return position.load();
 }
