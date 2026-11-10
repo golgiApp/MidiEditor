@@ -30,15 +30,15 @@ int main() {
     assert(model.canMove(second, 768));
     assert(model.move(second, 768));
     auto moved = xiv::renderRegionNotes(notes, model);
-    assert(moved.size() == 5); // sustained note now becomes two fragments
+    assert(moved.size() == 4); // Keep: sustained note is not retriggered after move
     auto first = std::find_if(moved.begin(), moved.end(), [](const auto &n) {
         return n.sourceId == 2 && n.startTick == 300;
     });
     auto later = std::find_if(moved.begin(), moved.end(), [](const auto &n) {
         return n.sourceId == 2 && n.startTick == 768;
     });
-    assert(first != moved.end() && first->endTick == 384);
-    assert(later != moved.end() && later->endTick == 854);
+    assert(first != moved.end() && first->endTick == 470);
+    assert(later == moved.end());
     assert(findNote(moved, 3)->startTick == 784);
     assert(findNote(moved, 4)->startTick == 100);
     // The source interval stays at 384..768 while playback shifts to 768..1152.
@@ -48,7 +48,7 @@ int main() {
     const int duplicate = model.duplicate(second, 1152);
     assert(duplicate > 0);
     auto duplicated = xiv::renderRegionNotes(notes, model);
-    assert(duplicated.size() == 7);
+    assert(duplicated.size() == 5);
     assert(duplicated.back().endTick >= 100);
     std::cout << "Phase 4B rendered-note contract tests passed\n";
 }

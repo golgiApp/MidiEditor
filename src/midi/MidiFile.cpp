@@ -1509,21 +1509,38 @@ bool MidiFile::channelMuted(int ch) {
 }
 
 void MidiFile::setRegionLayout(const xiv::MidiRegionModel &layout) {
-    // No mutation of original MIDI events: active arrangement is a snapshot.
+    // Never mutate the source event maps. Determine which tracks require a
+    // rendered note schedule (movement, trimming, or duplication). Previously
+    // only moved start positions triggered this, so trimming silently played
+    // the untrimmed original notes.
     _regionLayout = layout;
+    const int trackCount = _tracks ? _tracks->size() : 0;
+    std::vector<int> sourceEnds(trackCount, 0);
+    _regionTracksModified.assign(trackCount, false);
+    for (int ch = 0; ch < 16; ++ch) {
+        for (auto it = channels[ch]->eventMap()->cbegin();
+             it != channels[ch]->eventMap()->cend(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || !note->track() || !note->offEvent() || note->velocity() == 0)
+                continue;
+            const int i = _tracks->indexOf(note->track());
+            if (i >= 0 && i < trackCount)
+                sourceEnds[i] = std::max(sourceEnds[i], note->offEvent()->midiTime());
+        }
+    }
+    for (int i = 0; i < trackCount; ++i)
+        _regionTracksModified[i] = !_regionLayout.trackIsIdentity(i, sourceEnds[i]);
 }
 
 bool MidiFile::regionTrackHasChanged(int trackIndex) const {
-    for (const auto &r : _regionLayout.regions())
-        if (r.trackIndex == trackIndex && r.startTick != r.sourceStartTick)
-            return true;
-    return false;
+    return trackIndex >= 0 &&
+           trackIndex < static_cast<int>(_regionTracksModified.size()) &&
+           _regionTracksModified[trackIndex];
 }
 
 bool MidiFile::regionsChangeTiming() const {
-    for (const auto &r : _regionLayout.regions())
-        if (r.startTick != r.sourceStartTick) return true;
-    return false;
+    return std::any_of(_regionTracksModified.begin(), _regionTracksModified.end(),
+                       [](bool changed) { return changed; });
 }
 
 int MidiFile::arrangementEndTick() const {

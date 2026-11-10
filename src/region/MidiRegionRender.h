@@ -9,6 +9,7 @@
 
 #include "MidiRegionModel.h"
 #include <algorithm>
+#include <limits>
 #include <vector>
 
 namespace xiv {
@@ -32,6 +33,11 @@ struct RenderedRegionNote {
     int pitch = 60;
     int velocity = 100;
     int channel = 0;
+    // A note can be joined across two adjacent split fragments ONLY when the
+    // source slices are also consecutive. Independent region copies must
+    // retrigger even when their timeline endpoints happen to touch.
+    int sourceSliceStartTick = 0;
+    int sourceSliceEndTick = 0;
 };
 
 // Use the same model for arrangement previews and, once integrated, playback
@@ -48,47 +54,60 @@ inline std::vector<RenderedRegionNote> renderRegionNotes(
         for (const auto &region : model.regions()) {
             if (region.trackIndex != note.trackIndex) continue;
             hasRegions = true;
-            ProjectedNote projection;
-            if (!projectNote(region, note.startTick, note.endTick, projection)) continue;
+            const int sourceStart = std::max(note.startTick, region.sourceStartTick);
+            const int sourceEnd = std::min(note.endTick, region.sourceEndTick);
+            if (sourceEnd <= sourceStart) continue;
+
+            // A source note already sounding when this right-hand region begins
+            // is not retriggered for Keep or Shorten. With Split, its remaining
+            // source portion becomes a separate note at the new region start.
+            if (note.startTick < region.sourceStartTick &&
+                region.startNoteMode != CrossingNoteMode::Split) continue;
+
+            int renderedEndSource = sourceEnd;
+            if (note.endTick > region.sourceEndTick &&
+                region.endNoteMode == CrossingNoteMode::Keep) {
+                // Keep preserves the note's natural release, even if another
+                // region is subsequently moved. A later explicit Split or
+                // Shorten boundary can still cut the held note downstream.
+                renderedEndSource = note.endTick;
+                for (const auto &later : model.regions()) {
+                    if (later.trackIndex != note.trackIndex ||
+                        later.sourceStartTick <= region.sourceEndTick ||
+                        later.sourceStartTick >= renderedEndSource ||
+                        later.startNoteMode == CrossingNoteMode::Keep) continue;
+                    // An ordinary clone of earlier material must not truncate
+                    // the continuous note merely because it has a source start.
+                    if (later.sourceStartTick > region.sourceEndTick)
+                        renderedEndSource = later.sourceStartTick;
+                }
+            }
+            const int64_t outputStart = static_cast<int64_t>(region.startTick) +
+                                        sourceStart - region.sourceStartTick;
+            const int64_t outputEnd = static_cast<int64_t>(region.startTick) +
+                                      renderedEndSource - region.sourceStartTick;
+            if (outputEnd <= outputStart || outputStart < 0 ||
+                outputEnd > std::numeric_limits<int>::max()) continue;
             result.push_back({note.id, note.trackIndex,
-                              projection.startTick, projection.endTick,
-                              note.pitch, note.velocity, note.channel});
+                              static_cast<int>(outputStart),
+                              static_cast<int>(outputEnd),
+                              note.pitch, note.velocity, note.channel,
+                              sourceStart, renderedEndSource});
         }
         if (!hasRegions) {
             result.push_back({note.id, note.trackIndex, note.startTick,
-                              note.endTick, note.pitch, note.velocity, note.channel});
+                              note.endTick, note.pitch, note.velocity, note.channel,
+                              note.startTick, note.endTick});
         }
     }
-    // A sustained note passing through an unmoved split must still play as one
-    // continuous MIDI note, not a pair of retriggered segments.
+    // Adjacent split fragments are deliberately NOT merged here: a note
+    // intentionally split by the user must retrigger at the split tick.
     std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
-        if (a.trackIndex != b.trackIndex) return a.trackIndex < b.trackIndex;
-        if (a.sourceId != b.sourceId) return a.sourceId < b.sourceId;
-        if (a.startTick != b.startTick) return a.startTick < b.startTick;
-        return a.endTick < b.endTick;
-    });
-    std::vector<RenderedRegionNote> merged;
-    for (const auto &note : result) {
-        if (!merged.empty()) {
-            auto &previous = merged.back();
-            if (previous.trackIndex == note.trackIndex &&
-                previous.sourceId == note.sourceId &&
-                previous.channel == note.channel &&
-                previous.pitch == note.pitch &&
-                previous.velocity == note.velocity &&
-                previous.endTick == note.startTick) {
-                previous.endTick = note.endTick;
-                continue;
-            }
-        }
-        merged.push_back(note);
-    }
-    std::sort(merged.begin(), merged.end(), [](const auto &a, const auto &b) {
         if (a.startTick != b.startTick) return a.startTick < b.startTick;
         if (a.trackIndex != b.trackIndex) return a.trackIndex < b.trackIndex;
         return a.pitch < b.pitch;
     });
-    return merged;
+    return result;
 }
 
 } // namespace xiv

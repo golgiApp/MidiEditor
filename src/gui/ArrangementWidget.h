@@ -32,6 +32,12 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMenu>
+#include <QDialog>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <QVBoxLayout>
+#include <QDialogButtonBox>
+#include <QLabel>
 #include <QDebug>
 #include "../region/MidiRegionModel.h"
 #include "../region/RegionSplitPrecision.h"
@@ -50,6 +56,7 @@
 #include "../protocol/ProtocolItem.h"
 
 class ArrangementWidget final : public QWidget {
+    enum class RegionDragMode { Move, Duplicate, TrimLeft, TrimRight };
 public:
     explicit ArrangementWidget(QWidget *parent = nullptr) : QWidget(parent) {
         setMinimumHeight(130);
@@ -116,6 +123,7 @@ public:
         _regionPressed = false;
         _regionDragging = false;
         _moveRegionId = 0;
+        _dragMode = RegionDragMode::Move;
         _playheadMs = file ? file->msOfTick(file->cursorTick()) : -1;
         if (file) {
             file->setSoloTrack(nullptr);
@@ -239,6 +247,8 @@ public:
             entry.insert(QStringLiteral("startTick"), r.startTick);
             entry.insert(QStringLiteral("sourceStartTick"), r.sourceStartTick);
             entry.insert(QStringLiteral("sourceEndTick"), r.sourceEndTick);
+            entry.insert(QStringLiteral("startNoteMode"), static_cast<int>(r.startNoteMode));
+            entry.insert(QStringLiteral("endNoteMode"), static_cast<int>(r.endNoteMode));
             items.append(entry);
         }
         root.insert(QStringLiteral("regions"), items);
@@ -375,6 +385,8 @@ protected:
                 int low = 127, high = 0;
                 for (const auto &n : notes) {
                     xiv::ProjectedNote clipped;
+                    if (n.beginTick < region.sourceStartTick &&
+                        region.startNoteMode != xiv::CrossingNoteMode::Split) continue;
                     if (xiv::projectNote(region, n.beginTick, n.endTick, clipped)) {
                         low = std::min(low, n.pitch);
                         high = std::max(high, n.pitch);
@@ -385,6 +397,8 @@ protected:
                 p.setBrush(noteColor);
                 for (const auto &n : notes) {
                     xiv::ProjectedNote clipped;
+                    if (n.beginTick < region.sourceStartTick &&
+                        region.startNoteMode != xiv::CrossingNoteMode::Split) continue;
                     if (!xiv::projectNote(region, n.beginTick, n.endTick, clipped)) continue;
                     const int sx = std::max(x0 + 1,
                         xForMs(_file->msOfTick(clipped.startTick)));
@@ -401,12 +415,43 @@ protected:
         if (_regionDragging && _moveRegionId > 0) {
             const xiv::MidiRegion *moving = _regions.find(_moveRegionId);
             if (moving) {
-                const int newStart = _moveProposedTick;
-                const int left = xForMs(_file->msOfTick(newStart));
-                const int right = xForMs(_file->msOfTick(newStart + moving->duration()));
+                const int target = _moveProposedTick;
+                int previewStart = moving->startTick;
+                int previewEnd = moving->endTick();
+                bool valid = false;
+                QString description;
+                switch (_dragMode) {
+                case RegionDragMode::Move:
+                    previewStart = target;
+                    previewEnd = target + moving->duration();
+                    valid = _regions.canMove(moving->id, target);
+                    description = tr("Move region");
+                    break;
+                case RegionDragMode::Duplicate:
+                    previewStart = target;
+                    previewEnd = target + moving->duration();
+                    valid = _regions.canDuplicate(moving->id, target);
+                    description = tr("Duplicate region");
+                    break;
+                case RegionDragMode::TrimLeft:
+                    previewStart = target;
+                    valid = _regions.canTrimLeft(moving->id, target);
+                    description = tr("Trim left edge");
+                    break;
+                case RegionDragMode::TrimRight:
+                    previewEnd = target;
+                    valid = _regions.canTrimRight(moving->id, target,
+                                                  sourceEndTick(moving->trackIndex));
+                    description = tr("Trim right edge");
+                    break;
+                }
+                if (previewEnd <= previewStart) valid = false;
+                const int left = xForMs(_file->msOfTick(std::max(0, previewStart)));
+                const int right = xForMs(_file->msOfTick(std::max(0, previewEnd)));
                 const int top = rulerHeight + moving->trackIndex * laneHeight;
-                const bool valid = _regions.canMove(moving->id, newStart);
                 p.save();
+                p.setClipRect(QRect(headerWidth, rulerHeight,
+                                    width()-headerWidth, height()-rulerHeight));
                 p.setBrush(QColor(valid ? 47 : 170, valid ? 172 : 57,
                                   valid ? 109 : 65, 62));
                 p.setPen(QPen(QColor(valid ? "#70E4A0" : "#ED6977"),
@@ -416,7 +461,7 @@ protected:
                 p.setPen(QColor("#FFFFFF"));
                 p.drawText(QRect(left+5, top+16, std::max(40, right-left-8), 20),
                            Qt::AlignLeft | Qt::AlignVCenter,
-                           valid ? tr("Move region") : tr("Placement blocked"));
+                           valid ? description : tr("Placement blocked"));
                 p.restore();
             }
         }
@@ -582,7 +627,7 @@ protected:
         // still seeks and a drag across empty space still pans the view.
         if (pos.x() >= headerWidth && pos.y() >= rulerHeight) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
-            const xiv::MidiRegion *r = _regions.at(row, timelineTickAt(pos.x()));
+            const xiv::MidiRegion *r = hitRegion(row, pos.x());
             if (r && row >= 0 && row < _file->tracks()->size()) {
                 _selectedRegionId = r->id;
                 if (!MidiPlayer::isPlaying()) {
@@ -593,7 +638,21 @@ protected:
                     _movePressedX = pos.x();
                     _movePressedTick = timelineTickAt(pos.x());
                     _moveOffsetTick = _movePressedTick - r->startTick;
-                    _moveProposedTick = r->startTick;
+                    // Ctrl+drag copies the source material. Without Ctrl,
+                    // the first/last 8px are trim handles, not a region move.
+                    const int left = xForMs(_file->msOfTick(r->startTick));
+                    const int right = xForMs(_file->msOfTick(r->endTick()));
+                    const bool leftHandle = left >= headerWidth &&
+                        std::abs(pos.x() - left) <= 8;
+                    const bool rightHandle = right < width() &&
+                        std::abs(pos.x() - right) <= 8;
+                    _dragMode = (e->modifiers() & Qt::ControlModifier) ?
+                        RegionDragMode::Duplicate :
+                        leftHandle ? RegionDragMode::TrimLeft :
+                        rightHandle ? RegionDragMode::TrimRight :
+                        RegionDragMode::Move;
+                    _moveProposedTick = _dragMode == RegionDragMode::TrimRight ?
+                        r->endTick() : r->startTick;
                 }
                 MidiTrack *track = _file->tracks()->at(row);
                 setSelectedTrack(track);
@@ -634,12 +693,18 @@ protected:
             if (!_regionDragging &&
                 std::abs(pos.x() - _movePressedX) >= QApplication::startDragDistance()) {
                 _regionDragging = true;
-                setCursor(Qt::SizeAllCursor);
+                setCursor((_dragMode == RegionDragMode::TrimLeft ||
+                           _dragMode == RegionDragMode::TrimRight) ?
+                          Qt::SizeHorCursor : Qt::SizeAllCursor);
             }
             if (_regionDragging) {
-                // Preserve the mouse grab offset so a dragged region does not
-                // jump its start under the mouse. Movement is exact MIDI ticks.
-                _moveProposedTick = std::max(0, timelineTickAt(pos.x()) - _moveOffsetTick);
+                const int mouseTick = timelineTickAt(pos.x());
+                // Moving and copying preserve the original mouse offset;
+                // trimming instead follows the dragged region edge exactly.
+                _moveProposedTick =
+                    (_dragMode == RegionDragMode::Move ||
+                     _dragMode == RegionDragMode::Duplicate) ?
+                    std::max(0, mouseTick - _moveOffsetTick) : mouseTick;
                 update();
             }
             e->accept();
@@ -684,8 +749,21 @@ protected:
             }
         }
         QToolTip::hideText();
-        if (pos.x() >= headerWidth) {
-            setCursor(pos.y() < rulerHeight ? Qt::PointingHandCursor : Qt::OpenHandCursor);
+        if (_file && pos.x() >= headerWidth && pos.y() >= rulerHeight) {
+            const int row = (pos.y() - rulerHeight) / laneHeight;
+            if (const auto *r = hitRegion(row, pos.x())) {
+                const int left = xForMs(_file->msOfTick(r->startTick));
+                const int right = xForMs(_file->msOfTick(r->endTick()));
+                const bool edge = (left >= headerWidth && std::abs(pos.x()-left) <= 8) ||
+                                  (right < width() && std::abs(pos.x()-right) <= 8);
+                setCursor(edge ? Qt::SizeHorCursor : Qt::SizeAllCursor);
+                if (edge) QToolTip::showText(e->globalPosition().toPoint(),
+                              tr("Drag edge to trim; Ctrl+drag inside to duplicate"), this);
+                else QToolTip::showText(e->globalPosition().toPoint(),
+                              tr("Drag to move; Ctrl+drag to duplicate"), this);
+            } else setCursor(Qt::OpenHandCursor);
+        } else if (pos.x() >= headerWidth) {
+            setCursor(Qt::PointingHandCursor);
         } else {
             setCursor(Qt::ArrowCursor);
         }
@@ -702,8 +780,16 @@ protected:
             _regionDragging = false;
             _moveRegionId = 0;
             unsetCursor();
-            // This first phase only moves regions within their original track.
-            if (drag && releaseRow == _moveRow) moveRegion(id, targetTick);
+            // Region operations stay within the original track; editing is
+            // disabled during playback to avoid changing an active scheduler.
+            if (drag && releaseRow == _moveRow) {
+                switch (_dragMode) {
+                case RegionDragMode::Move: moveRegion(id, targetTick); break;
+                case RegionDragMode::Duplicate: duplicateRegion(id, targetTick); break;
+                case RegionDragMode::TrimLeft: trimRegionLeft(id, targetTick); break;
+                case RegionDragMode::TrimRight: trimRegionRight(id, targetTick); break;
+                }
+            }
             update();
             e->accept();
             return;
@@ -838,10 +924,52 @@ private:
     }
     void splitRegion(int id, int tick) {
         if (!_file) return;
+        const xiv::MidiRegion *region = _regions.find(id);
+        if (!region || tick <= region->startTick || tick >= region->endTick()) return;
+        const int sourceCut = region->sourceStartTick + tick - region->startTick;
+        xiv::CrossingNoteMode choice = xiv::CrossingNoteMode::Keep;
+        bool hasCrossingNotes = false;
+        if (region->trackIndex >= 0 && region->trackIndex < _file->tracks()->size()) {
+            MidiTrack *track = _file->tracks()->at(region->trackIndex);
+            const auto &notes = _preview.value(track);
+            for (const auto &note : notes) {
+                if (note.beginTick < sourceCut && sourceCut < note.endTick &&
+                    note.endTick > region->sourceStartTick) {
+                    hasCrossingNotes = true;
+                    break;
+                }
+            }
+        }
+        if (hasCrossingNotes) {
+            QDialog dialog(this);
+            dialog.setWindowTitle(tr("Notes Crossing Split Point"));
+            auto *layout = new QVBoxLayout(&dialog);
+            auto *message = new QLabel(tr("Do you want to keep, shorten, or split "
+                                          "the notes that cross the split point?"), &dialog);
+            message->setWordWrap(true);
+            layout->addWidget(message);
+            auto *keep = new QRadioButton(tr("Keep - let notes sustain past the split"), &dialog);
+            auto *shorten = new QRadioButton(tr("Shorten - end notes at the split"), &dialog);
+            auto *split = new QRadioButton(tr("Split - retrigger notes in the next region"), &dialog);
+            keep->setChecked(true);
+            layout->addWidget(keep);
+            layout->addWidget(shorten);
+            layout->addWidget(split);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
+                                                 QDialogButtonBox::Cancel, &dialog);
+            QObject::connect(buttons, &QDialogButtonBox::accepted,
+                             &dialog, &QDialog::accept);
+            QObject::connect(buttons, &QDialogButtonBox::rejected,
+                             &dialog, &QDialog::reject);
+            layout->addWidget(buttons);
+            if (dialog.exec() != QDialog::Accepted) return;
+            if (shorten->isChecked()) choice = xiv::CrossingNoteMode::Shorten;
+            else if (split->isChecked()) choice = xiv::CrossingNoteMode::Split;
+        }
         // Snapshot BEFORE modifying the region model. Register the operation
         // in the same MIDI Protocol used by Ctrl+Z / Ctrl+Y elsewhere.
         ProtocolEntry *before = _regionHistory.copy();
-        const int newId = _regions.split(id, tick);
+        const int newId = _regions.split(id, tick, choice);
         if (!newId) { delete before; return; }
         _selectedRegionId = newId;
         _file->setRegionLayout(_regions);
@@ -875,6 +1003,48 @@ private:
         update();
     }
 
+    // Every operation creates one undo step and updates the sidecar. Notes are
+    // projected during playback/export; neither trim nor duplication edits
+    // source MIDI note-on/off pairs.
+    void finishRegionEdit(ProtocolEntry *before, const QString &description) {
+        _file->setRegionLayout(_regions);
+        _file->protocol()->startNewAction(description);
+        _file->protocol()->enterUndoStep(new ProtocolItem(before, &_regionHistory));
+        _file->protocol()->endAction();
+        if (!_file->path().isEmpty() && QFileInfo::exists(_file->path()) &&
+            !saveRegionLayout())
+            qWarning() << "XIV MIDI Studio: edited region could not be persisted";
+        refreshHorizontalRange();
+        update();
+    }
+    void duplicateRegion(int id, int newStartTick) {
+        if (!_file || MidiPlayer::isPlaying() || !_regions.canDuplicate(id, newStartTick)) return;
+        ProtocolEntry *before = _regionHistory.copy();
+        const int newId = _regions.duplicate(id, newStartTick);
+        if (!newId) { delete before; return; }
+        _selectedRegionId = newId;
+        finishRegionEdit(before, tr("Duplicate Region"));
+    }
+    void trimRegionLeft(int id, int newStartTick) {
+        if (!_file || MidiPlayer::isPlaying()) return;
+        const auto *r = _regions.find(id);
+        if (!r || r->startTick == newStartTick ||
+            !_regions.canTrimLeft(id, newStartTick)) return;
+        ProtocolEntry *before = _regionHistory.copy();
+        if (!_regions.trimLeft(id, newStartTick)) { delete before; return; }
+        finishRegionEdit(before, tr("Trim Region Start"));
+    }
+    void trimRegionRight(int id, int newEndTick) {
+        if (!_file || MidiPlayer::isPlaying()) return;
+        const auto *r = _regions.find(id);
+        const int sourceEnd = r ? sourceEndTick(r->trackIndex) : 0;
+        if (!r || r->endTick() == newEndTick ||
+            !_regions.canTrimRight(id, newEndTick, sourceEnd)) return;
+        ProtocolEntry *before = _regionHistory.copy();
+        if (!_regions.trimRight(id, newEndTick, sourceEnd)) { delete before; return; }
+        finishRegionEdit(before, tr("Trim Region End"));
+    }
+
     void loadRegionLayout() {
         if (!_file || _file->path().trimmed().isEmpty()) return;
         QFile input(_file->path() + QStringLiteral(".xivms-regions.json"));
@@ -898,11 +1068,22 @@ private:
                 !o.value(QStringLiteral("startTick")).isDouble() ||
                 !o.value(QStringLiteral("sourceStartTick")).isDouble() ||
                 !o.value(QStringLiteral("sourceEndTick")).isDouble()) return;
+            // Missing fields preserve compatibility with existing sidecars.
+            // Old v0.3 sidecars predate the crossing-note dialog. A region
+            // starting after source tick zero came from a split; those splits
+            // behaved as Keep before explicit boundary choices existed.
+            const int legacyEntryMode = o.value(QStringLiteral("sourceStartTick")).toInt() > 0 ? 0 : 2;
+            const int entryMode = o.value(QStringLiteral("startNoteMode")).toInt(legacyEntryMode);
+            const int exitMode = o.value(QStringLiteral("endNoteMode")).toInt(0);
+            if (entryMode < 0 || entryMode > 2 || exitMode < 0 || exitMode > 2)
+                return;
             incoming.push_back({o.value(QStringLiteral("id")).toInt(),
                                 o.value(QStringLiteral("track")).toInt(-1),
                                 o.value(QStringLiteral("startTick")).toInt(-1),
                                 o.value(QStringLiteral("sourceStartTick")).toInt(-1),
-                                o.value(QStringLiteral("sourceEndTick")).toInt(-1)});
+                                o.value(QStringLiteral("sourceEndTick")).toInt(-1),
+                                static_cast<xiv::CrossingNoteMode>(entryMode),
+                                static_cast<xiv::CrossingNoteMode>(exitMode)});
         }
         if (!_regions.replaceValidated(incoming, _file->tracks()->size()))
             qWarning() << "XIV Midi Studio: invalid region sidecar ignored";
@@ -919,6 +1100,7 @@ private:
     bool _timelinePressed = false;
     bool _regionPressed = false;
     bool _regionDragging = false;
+    RegionDragMode _dragMode = RegionDragMode::Move;
     int _moveRegionId = 0;
     int _moveRow = -1;
     int _movePressedX = 0;
@@ -931,6 +1113,29 @@ private:
     int _hoverRow = -1;
     RegionHistoryEntry _regionHistory{this};
 
+    // Returns the actual source ending tick for a region's track, including
+    // material hidden by a previous trim. The original note map is untouched.
+    int sourceEndTick(int trackIndex) const {
+        if (!_file || trackIndex < 0 || trackIndex >= _file->tracks()->size()) return 0;
+        int end = 0;
+        const auto &notes = _preview.value(_file->tracks()->at(trackIndex));
+        for (const auto &note : notes) end = std::max(end, note.endTick);
+        return end;
+    }
+    const xiv::MidiRegion *hitRegion(int row, int x) const {
+        if (!_file || row < 0 || row >= _file->tracks()->size()) return nullptr;
+        if (const auto *r = _regions.at(row, timelineTickAt(x))) return r;
+        // A one-pixel rounding discrepancy at a border must not make an edge
+        // handle impossible to grab, especially at a low zoom setting.
+        for (const auto &r : _regions.regions()) {
+            if (r.trackIndex != row) continue;
+            const int left = xForMs(_file->msOfTick(r.startTick));
+            const int right = xForMs(_file->msOfTick(r.endTick()));
+            if ((left >= headerWidth && std::abs(x-left) <= 5) ||
+                (right <= width() && std::abs(x-right) <= 5)) return _regions.find(r.id);
+        }
+        return nullptr;
+    }
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     // Hit targets match the painted buttons. Do not overlap the track name.
     QRect instrumentRect(int y) const { return QRect(13, y + 49, 299, 27); }

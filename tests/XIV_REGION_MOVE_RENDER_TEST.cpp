@@ -31,11 +31,10 @@ int main() {
     assert(m.move(b, 960));     // leaves silence after left half
     assert(m.find(b)->startTick == 960 && m.find(b)->sourceStartTick == 480);
     auto moved = renderRegionNotes(notes, m);
-    assert(moved.size() == 4); // cross-boundary note now has two fragments
-    assert(moved[0].sourceId == 1 && moved[0].startTick == 100 && moved[0].endTick == 480);
+    assert(moved.size() == 3); // Keep: cross-boundary note stays continuous
+    assert(moved[0].sourceId == 1 && moved[0].startTick == 100 && moved[0].endTick == 700);
     assert(moved[1].sourceId == 3 && moved[1].startTick == 200 && moved[1].endTick == 400);
-    assert(moved[2].sourceId == 1 && moved[2].startTick == 960 && moved[2].endTick == 1180);
-    assert(moved[3].sourceId == 2 && moved[3].startTick == 980 && moved[3].endTick == 1080);
+    assert(moved[2].sourceId == 2 && moved[2].startTick == 980 && moved[2].endTick == 1080);
     assert(m.move(b, 480));
     const auto back = renderRegionNotes(notes, m);
     assert(back.size() == 3 && back[0].endTick == 700);
@@ -47,7 +46,7 @@ int main() {
     assert(!m.duplicate(b, 1000)); // overlaps clone
     auto duplicated = renderRegionNotes(notes, m);
     assert(duplicated.size() == 4); // adds only the first fragment of source note 1
-    assert(duplicated.back().sourceId == 1 && duplicated.back().startTick == 1060 && duplicated.back().endTick == 1440);
+    assert(duplicated.back().sourceId == 1 && duplicated.back().startTick == 1060 && duplicated.back().endTick == 1660);
     assert(m.replaceValidated(m.regions(), 2));
     assert(!m.move(a, 970));
     assert(m.move(c, 1440));

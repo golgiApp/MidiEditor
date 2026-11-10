@@ -602,6 +602,9 @@ private:
     /** \brief Player data and state */
     QMultiMap<int, MidiEvent *> *playerMap;
     xiv::MidiRegionModel _regionLayout;
+    // Cached source-coverage test: a trim or duplicate changes note output
+    // even if the region's arrangement start has not moved.
+    std::vector<bool> _regionTracksModified;
     QList<MidiEvent *> _renderedPlaybackEvents;
     bool regionTrackHasChanged(int trackIndex) const;
     void buildRenderedNoteEvents(QMultiMap<int, MidiEvent *> &destination,
