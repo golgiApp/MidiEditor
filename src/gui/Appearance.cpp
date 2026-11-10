@@ -135,7 +135,7 @@ bool Appearance::_toolbarTwoRowMode = false;
 bool Appearance::_toolbarCustomizeEnabled = false;
 QStringList Appearance::_toolbarActionOrder = QStringList();
 QStringList Appearance::_toolbarEnabledActions = QStringList();
-bool Appearance::_toolbarVisible = true;
+bool Appearance::_toolbarVisible = false;
 bool Appearance::_shuttingDown = false;
 bool Appearance::_skipSettingsSave = false;
 
@@ -176,7 +176,7 @@ void Appearance::init(QSettings *settings) {
     _toolbarCustomizeEnabled = settings->value("toolbar_customize_enabled", false).toBool();
     _toolbarActionOrder = settings->value("toolbar_action_order", QStringList()).toStringList();
     _toolbarEnabledActions = settings->value("toolbar_enabled_actions", QStringList()).toStringList();
-    _toolbarVisible = settings->value("toolbar_visible", true).toBool();
+    _toolbarVisible = settings->value("toolbar_visible", false).toBool();
 
     // Load custom color tracking FIRST
     QList<QVariant> customChannels = settings->value("custom_channel_colors", QList<QVariant>()).toList();

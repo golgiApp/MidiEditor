@@ -153,11 +153,11 @@ void DeleteOverlapsDialog::onModeChanged() {
 
     if (_monoModeRadio && _monoModeRadio->isChecked()) {
         description = tr("Removes overlapping notes of the same pitch. When notes of the same pitch overlap, "
-            "longer notes are preserved and shorter overlapping notes are removed or shortened. "
+            "longer notes are preserved and shorter overlapping notes are removed or shortened, leaving an 8-tick gap where possible. "
             "This is useful for cleaning up duplicate notes or notes hidden under long sustains.");
     } else if (_polyModeRadio && _polyModeRadio->isChecked()) {
         description = tr("Makes the part monophonic by shortening all overlapping notes regardless of pitch. "
-            "No two notes will overlap after this operation. This is useful for preparing parts "
+            "Shortened notes leave an 8-tick gap where possible. This is useful for preparing parts "
             "for monophonic synthesizers or removing unwanted overlaps in solo lines.");
     } else if (_doublesModeRadio && _doublesModeRadio->isChecked()) {
         description = tr("Removes notes that are exact duplicates (same pitch, start time, end time, and duration). "

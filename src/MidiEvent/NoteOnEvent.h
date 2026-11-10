@@ -51,7 +51,7 @@ public:
      * \param ch MIDI channel (0-15)
      * \param track The MIDI track this event belongs to
      */
-    NoteOnEvent(int note, int velocity, int ch, MidiTrack *track);
+    NoteOnEvent(int note, int velocity, int ch, MidiTrack *track, bool autoPair = true);
 
     /**
      * \brief Creates a new NoteOnEvent copying another instance.

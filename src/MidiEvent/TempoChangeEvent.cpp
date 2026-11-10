@@ -50,6 +50,7 @@ void TempoChangeEvent::reloadState(ProtocolEntry *entry) {
     }
     MidiEvent::reloadState(entry);
     _beats = other->_beats;
+    if (file()) file()->calcMaxTime();
 }
 
 int TempoChangeEvent::line() {

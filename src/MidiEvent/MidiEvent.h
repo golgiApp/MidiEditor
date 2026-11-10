@@ -119,6 +119,10 @@ public:
 
     virtual void setMidiTime(int t, bool toProtocol = true);
 
+    // Only for detached event copies used by the non-destructive region renderer.
+    // Unlike setMidiTime(), this never inserts events into the source channels.
+    void setDetachedMidiTime(int tick) { timePos = tick; }
+
     int midiTime();
 
     void setFile(MidiFile *f);

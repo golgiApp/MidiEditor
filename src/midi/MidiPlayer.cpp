@@ -31,7 +31,7 @@ bool MidiPlayer::playing = false;
 SingleNotePlayer *MidiPlayer::singleNotePlayer = new SingleNotePlayer();
 double MidiPlayer::_speed = 1;
 
-void MidiPlayer::play(MidiFile *file) {
+void MidiPlayer::play(MidiFile *file, bool recording) {
     if (isPlaying()) {
         stop();
     }
@@ -56,8 +56,15 @@ void MidiPlayer::play(MidiFile *file) {
     if (file->pauseTick() >= 0) {
         tickFrom = file->pauseTick();
     }
-    file->preparePlayerData(tickFrom);
-    filePlayer->setFile(file);
+    int startMs = file->msOfTick(tickFrom);
+    const auto cycle = PlayerThread::cycleRange();
+    if (!recording && cycle.active() && !cycle.contains(startMs))
+        startMs = cycle.start;
+
+    // A full playback schedule allows the ruler range to change during play.
+    // Recording continues to use its original, forward-only schedule.
+    file->preparePlayerData(recording ? tickFrom : 0);
+    filePlayer->setFile(file, startMs, recording);
     filePlayer->start(QThread::TimeCriticalPriority);
     playing = true;
 }
@@ -69,6 +76,7 @@ void MidiPlayer::play(NoteOnEvent *event) {
 void MidiPlayer::stop() {
     playing = false;
     filePlayer->stop();
+    filePlayer->wait();
 }
 
 bool MidiPlayer::isPlaying() {

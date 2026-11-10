@@ -20,6 +20,7 @@
 #define MATRIXWIDGET_H_
 
 // Project includes
+#include "../region/MidiRegionRender.h"
 #include "PaintWidget.h"
 #include "Appearance.h"
 #include "../midi/MidiTrack.h"
@@ -30,6 +31,7 @@
 #include <QObject>
 #include <QString>
 #include <set>
+#include <functional>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QWidget>
@@ -113,6 +115,13 @@ public:
         update();
     }
     MidiTrack *focusedTrack() const { return _focusedTrack; }
+    // Read-only rendered note projection from the selected MIDI region.
+    // Do not use source-event hit testing on moved/looped note positions.
+    std::function<void(int, std::vector<xiv::OwnedRegionNote>, const QString &)> commitRegionNotes;
+    void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
+                       bool showAllRegions, bool navigate = false);
+    void refreshRegionViewNotes();
+    bool forceLegatoRegionSelection();
 
     void setGMDrumLabelsVisible(bool show);
     bool gmDrumLabelsVisible() const { return _showGMDrumLabels; }
@@ -239,6 +248,7 @@ public:
 
     /** \brief Total number of MIDI lines (128 notes + special event lines) */
     static const int NUM_LINES = 139;
+    void setMidiEventLanesVisible(bool visible);
 
     /** \brief Horizontal scaling constant: pixels per second at 1.0 zoom */
     static const int PIXEL_PER_S = 100;
@@ -721,7 +731,40 @@ private:
     /** \brief Currently loaded MIDI file */
     MidiFile *file;
     MidiTrack *_focusedTrack = nullptr;
+    xiv::MidiRegionModel _regionViewModel;
+    std::vector<xiv::RenderedRegionNote> _regionViewNotes;
+    int _selectedViewRegionId = 0;
+    bool _regionViewEnabled = false;
+    bool _regionShowAll = false;
+    bool _showMidiEventLanes = false;
+    int lastVisibleLine() const { return _showMidiEventLanes ? NUM_LINES : 128; }
+    bool _regionEditingSafe = false;
+    enum class RegionGesture { None, Select, Move, ResizeLeft, ResizeRight, Add, NoteMenu };
+    RegionGesture _regionGesture = RegionGesture::None;
+    QPoint _regionPressPoint;
+    std::set<int> _regionSelection;
+    std::set<int> _regionBoxBase;
+    QRect _regionSelectionBox;
+    int _regionAnchorId = 0;
+    Qt::MouseButton _regionGestureButton = Qt::NoButton;
+    Qt::KeyboardModifiers _regionGestureModifiers = Qt::NoModifier;
+
+    const xiv::MidiRegion *editableRegion() const;
+    QRect regionNoteRect(const xiv::RenderedRegionNote &note);
+    int regionEditTick(int x);
+    std::vector<xiv::OwnedRegionNote> regionNotesForEdit(const xiv::MidiRegion &region) const;
+    bool beginRegionGesture(QMouseEvent *event);
+    void updateRegionGesture(const QPoint &point);
+    void endRegionGesture(QMouseEvent *event);
+    bool adjustSelectedRegionNoteEnds(bool overlapsOnly);
+    bool deleteRegionSelection();
     bool _showGMDrumLabels = false;
+    bool _pitchRangeDragging = false;
+    int _pitchRangeAnchor = -1;
+    bool _pitchRangeAdditive = false;
+    QList<MidiEvent *> _pitchRangeExisting;
+    void selectPitchRange(int low, int high);
+
 
     // === Display Areas ===
 

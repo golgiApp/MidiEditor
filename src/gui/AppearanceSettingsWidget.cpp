@@ -127,18 +127,9 @@ AppearanceSettingsWidget::AppearanceSettingsWidget(QWidget *parent)
     connect(styleCombo, SIGNAL(currentTextChanged(QString)), this, SLOT(styleChanged(QString)));
     styleLayout->addWidget(styleCombo, 0, 1);
 
-    styleLayout->addWidget(new QLabel(tr("Theme Preset")), 1, 0);
-    _themeCombo = new QComboBox(this);
-    _themeCombo->addItems({tr("Default"), tr("Light"), tr("Dark"), 
-                          tr("Sakura"), tr("AMOLED"), tr("Material Dark"), tr("Nord"), tr("Airy")});
-    _themeCombo->setCurrentIndex(static_cast<int>(Appearance::applicationTheme()));
-    connect(_themeCombo, SIGNAL(currentIndexChanged(int)), this, SLOT(themeChanged(int)));
-    styleLayout->addWidget(_themeCombo, 1, 1);
-    
-    // Initial check for windowsvista
-    if (Appearance::applicationStyle().toLower() == "windowsvista") {
-        _themeCombo->setEnabled(false);
-    }
+    // XIV MIDI Studio is permanently dark. Do not expose a theme selector.
+    _themeCombo = nullptr;
+    Appearance::setApplicationTheme(Appearance::ThemeMaterialDark);
 
     styleLayout->addWidget(new QLabel(tr("Color Preset")), 2, 0);
     QComboBox *presetCombo = new QComboBox(this);
@@ -369,6 +360,7 @@ void AppearanceSettingsWidget::styleChanged(const QString &style) {
         }
     }
     Appearance::setApplicationStyle(style);
+    Appearance::setApplicationTheme(Appearance::ThemeMaterialDark);
     Appearance::save();
 
     // Force immediate color refresh for all widgets
@@ -378,8 +370,8 @@ void AppearanceSettingsWidget::styleChanged(const QString &style) {
     update();
 }
 
-void AppearanceSettingsWidget::themeChanged(int index) {
-    Appearance::setApplicationTheme(static_cast<Appearance::ApplicationTheme>(index));
+void AppearanceSettingsWidget::themeChanged(int /*index*/) {
+    Appearance::setApplicationTheme(Appearance::ThemeMaterialDark);
     Appearance::save();
     
     // Apply style sets palette and resets theme override

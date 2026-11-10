@@ -20,6 +20,7 @@
 
 #include <QDataStream>
 #include <QFile>
+#include <QFileInfo>
 #include <QSet>
 
 #include "../MidiEvent/ControlChangeEvent.h"
@@ -38,6 +39,8 @@
 #include "MidiTrack.h"
 #include "InstrumentDefinitions.h"
 #include "../support/MidiIntervalEdit.h"
+#include "../region/MidiRegionRender.h"
+#include <QHash>
 #include "math.h"
 #include <algorithm>
 
@@ -169,6 +172,8 @@ MidiFile::MidiFile(int ticks, Protocol *p) {
 }
 
 MidiFile::~MidiFile() {
+    qDeleteAll(_renderedPlaybackEvents);
+    _renderedPlaybackEvents.clear();
     // Conservative cleanup - only delete containers, not the complex
     // protocol-managed objects to avoid crashes
 
@@ -1503,8 +1508,100 @@ bool MidiFile::channelMuted(int ch) {
     return channel(ch)->mute();
 }
 
+void MidiFile::setRegionLayout(const xiv::MidiRegionModel &layout) {
+    // Never mutate the source event maps. Determine which tracks require a
+    // rendered note schedule (movement, trimming, or duplication). Previously
+    // only moved start positions triggered this, so trimming silently played
+    // the untrimmed original notes.
+    _regionLayout = layout;
+    const int trackCount = _tracks ? _tracks->size() : 0;
+    std::vector<int> sourceEnds(trackCount, 0);
+    _regionTracksModified.assign(trackCount, false);
+    for (int ch = 0; ch < 16; ++ch) {
+        for (auto it = channels[ch]->eventMap()->cbegin();
+             it != channels[ch]->eventMap()->cend(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || !note->track() || !note->offEvent() || note->velocity() == 0)
+                continue;
+            const int i = _tracks->indexOf(note->track());
+            if (i >= 0 && i < trackCount)
+                sourceEnds[i] = std::max(sourceEnds[i], note->offEvent()->midiTime());
+        }
+    }
+    for (int i = 0; i < trackCount; ++i)
+        _regionTracksModified[i] = !_regionLayout.trackIsIdentity(i, sourceEnds[i]);
+}
+
+bool MidiFile::regionTrackHasChanged(int trackIndex) const {
+    return trackIndex >= 0 &&
+           trackIndex < static_cast<int>(_regionTracksModified.size()) &&
+           _regionTracksModified[trackIndex];
+}
+
+bool MidiFile::regionsChangeTiming() const {
+    return std::any_of(_regionTracksModified.begin(), _regionTracksModified.end(),
+                       [](bool changed) { return changed; });
+}
+
+int MidiFile::arrangementEndTick() const {
+    int result = 0;
+    for (const auto &r : _regionLayout.regions())
+        if (regionTrackHasChanged(r.trackIndex)) result = std::max(result, r.endTick());
+    return result;
+}
+
+void MidiFile::buildRenderedNoteEvents(QMultiMap<int, MidiEvent *> &destination,
+                                       QList<MidiEvent *> &owned) const {
+    if (!regionsChangeTiming() || !_tracks) return;
+    std::vector<xiv::SourceRegionNote> source;
+    QHash<int, NoteOnEvent *> byId;
+    int nextId = 1;
+    for (int ch = 0; ch < 16; ++ch) {
+        for (auto it = channels[ch]->eventMap()->cbegin();
+             it != channels[ch]->eventMap()->cend(); ++it) {
+            auto *on = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!on || !on->track() || !on->offEvent() || on->velocity() == 0) continue;
+            const int trackIndex = _tracks->indexOf(on->track());
+            if (trackIndex < 0 || !regionTrackHasChanged(trackIndex)) continue;
+            if (on->offEvent()->midiTime() <= on->midiTime()) continue;
+            const int id = nextId++;
+            byId.insert(id, on);
+            source.push_back({id, trackIndex, on->midiTime(),
+                              on->offEvent()->midiTime(), on->note(),
+                              on->velocity(), on->channel()});
+        }
+    }
+    for (const auto &note : xiv::renderRegionNotes(source, _regionLayout)) {
+        NoteOnEvent *on;
+        OffEvent *off;
+        if (note.ownedNoteId) {
+            MidiTrack *track = _tracks->at(note.trackIndex);
+            if (!track) continue;
+            // Detached events must stay out of the parser's pairing registry.
+            on = new NoteOnEvent(note.pitch, note.velocity, note.channel, track, false);
+            off = new OffEvent(note.channel, on->line(), track, false);
+            on->setFile(track->file());
+            off->setFile(track->file());
+        } else {
+            auto *original = byId.value(note.sourceId, nullptr);
+            if (!original || !original->offEvent()) continue;
+            on = new NoteOnEvent(*original);
+            off = new OffEvent(*original->offEvent());
+        }
+        off->setOnEvent(on);
+        on->setDetachedMidiTime(note.startTick);
+        off->setDetachedMidiTime(note.endTick);
+        owned.append(on);
+        owned.append(off);
+        destination.insert(note.startTick, on);
+        destination.insert(note.endTick, off);
+    }
+}
+
 void MidiFile::preparePlayerData(int tickFrom) {
     playerMap->clear();
+    qDeleteAll(_renderedPlaybackEvents);
+    _renderedPlaybackEvents.clear();
     QList<MidiEvent *> *prgList;
 
     for (int i = 0; i < 19; i++) {
@@ -1522,6 +1619,20 @@ void MidiFile::preparePlayerData(int tickFrom) {
         while (it != channelEvents->end()) {
             int tick = it.key();
             MidiEvent *event = it.value();
+            // The following tracks are rendered into a separate non-destructive
+            // event schedule below. Sending source note events too would make
+            // both original and moved notes audible.
+            bool replacedNote = false;
+            if (i < 16 && event->track()) {
+                const int trackIndex = _tracks->indexOf(event->track());
+                if (trackIndex >= 0 && regionTrackHasChanged(trackIndex)) {
+                    if (auto *on = dynamic_cast<NoteOnEvent *>(event))
+                        replacedNote = on->offEvent() != nullptr;
+                    else if (auto *off = dynamic_cast<OffEvent *>(event))
+                        replacedNote = dynamic_cast<NoteOnEvent *>(off->onEvent()) != nullptr;
+                }
+            }
+            if (replacedNote) { ++it; continue; }
             if (tick >= tickFrom) {
                 // all Events after cursorTick are added
                 int ms = msOfTick(tick);
@@ -1551,6 +1662,14 @@ void MidiFile::preparePlayerData(int tickFrom) {
 
         delete prgList;
         prgList = 0;
+    }
+    if (regionsChangeTiming()) {
+        QMultiMap<int, MidiEvent *> rendered;
+        buildRenderedNoteEvents(rendered, _renderedPlaybackEvents);
+        for (auto it = rendered.cbegin(); it != rendered.cend(); ++it) {
+            if (it.key() < tickFrom || channelMuted(it.value()->channel())) continue;
+            playerMap->insert(msOfTick(it.key()), it.value());
+        }
     }
 }
 
@@ -1607,8 +1726,10 @@ bool MidiFile::save(QString path) {
         data.append((qint8) ((trackL & (0xFF << 8 * i)) >> 8 * i));
     }
 
+    // A format-0 source becomes format 1 when the arrangement adds tracks.
+    const int outputFormat = numTracks() > 1 ? 1 : _midiFormat;
     for (int i = 1; i >= 0; i--) {
-        data.append((qint8) ((_midiFormat & (0xFF << 8 * i)) >> 8 * i));
+        data.append((qint8) ((outputFormat & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
@@ -1687,6 +1808,78 @@ bool MidiFile::save(QString path) {
     return true;
 }
 
+bool MidiFile::saveArrangedMidi(QString path) {
+    if (path.isEmpty() || (QFileInfo(path).absoluteFilePath() ==
+                           QFileInfo(_path).absoluteFilePath())) return false;
+    QMultiMap<int, MidiEvent *> allEvents;
+    QList<MidiEvent *> owned;
+    buildRenderedNoteEvents(allEvents, owned);
+    for (int ch = 0; ch < 19; ++ch) {
+        for (auto it = channels[ch]->eventMap()->cbegin();
+             it != channels[ch]->eventMap()->cend(); ++it) {
+            MidiEvent *event = it.value();
+            bool replaced = false;
+            if (ch < 16 && event->track()) {
+                const int trackIndex = _tracks->indexOf(event->track());
+                if (trackIndex >= 0 && regionTrackHasChanged(trackIndex)) {
+                    if (auto *on = dynamic_cast<NoteOnEvent *>(event))
+                        replaced = on->offEvent() != nullptr;
+                    else if (auto *off = dynamic_cast<OffEvent *>(event))
+                        replaced = dynamic_cast<NoteOnEvent *>(off->onEvent()) != nullptr;
+                }
+            }
+            if (!replaced) allEvents.insert(it.key(), event);
+        }
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) { qDeleteAll(owned); return false; }
+    QByteArray data;
+    data.append("MThd", 4);
+    data.append(char(0)); data.append(char(0)); data.append(char(0)); data.append(char(6));
+    const int trackCount = numTracks();
+    const int outputFormat = trackCount > 1 ? 1 : _midiFormat;
+    data.append(char((outputFormat >> 8) & 255)); data.append(char(outputFormat & 255));
+    data.append(char((trackCount >> 8) & 255)); data.append(char(trackCount & 255));
+    data.append(char((timePerQuarter >> 8) & 255)); data.append(char(timePerQuarter & 255));
+    const int finalEnd = std::max(endTick(), arrangementEndTick());
+    for (int t = 0; t < trackCount; ++t) {
+        QByteArray trackBytes;
+        MidiTrack *track = _tracks->at(t);
+        if (auto *name = track->nameEvent()) {
+            // A track name belongs to its own MTrk chunk, even though the
+            // editor stores text events in the shared meta-event channel.
+            trackBytes.append(writeDeltaTime(0));
+            trackBytes.append(name->save());
+        }
+        int last = 0;
+        for (auto it = allEvents.cbegin(); it != allEvents.cend(); ++it) {
+            MidiEvent *event = it.value();
+            if (auto *text = dynamic_cast<TextEvent *>(event);
+                text && text->type() == TextEvent::TRACKNAME) continue;
+            const bool meta = event->channel() >= 16;
+            if ((meta && t != 0) || (!meta && track != event->track()))
+                continue;
+            const int tick = it.key();
+            if (tick < last) continue;
+            trackBytes.append(writeDeltaTime(tick - last));
+            trackBytes.append(event->save());
+            last = tick;
+        }
+        trackBytes.append(writeDeltaTime(std::max(0, finalEnd - last)));
+        trackBytes.append(char(0xFF)); trackBytes.append(char(0x2F)); trackBytes.append(char(0));
+        data.append("MTrk", 4);
+        const unsigned n = static_cast<unsigned>(trackBytes.size());
+        data.append(char((n >> 24) & 255)); data.append(char((n >> 16) & 255));
+        data.append(char((n >> 8) & 255)); data.append(char(n & 255));
+        data.append(trackBytes);
+    }
+    const bool ok = file.write(data) == data.size();
+    file.close();
+    qDeleteAll(owned);
+    if (!ok) QFile::remove(path);
+    return ok;
+}
+
 bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
     QFile *f = new QFile(path);
 
@@ -1697,7 +1890,11 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
     QDataStream *stream = new QDataStream(f);
     stream->setByteOrder(QDataStream::BigEndian);
 
-    int actualEnd = (endTick == -1) ? this->endTick() : endTick;
+    int actualEnd = (endTick == -1) ?
+        std::max(this->endTick(), arrangementEndTick()) : endTick;
+    QList<MidiEvent *> regionExportOwned;
+    QMultiMap<int, MidiEvent *> regionExportNotes;
+    buildRenderedNoteEvents(regionExportNotes, regionExportOwned);
 
     // Collect all events, filtering by range and mute/solo state
     QMultiMap<int, MidiEvent *> allEvents = QMultiMap<int, MidiEvent *>();
@@ -1724,6 +1921,18 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
         for (MidiEvent *event : channelEvents) {
             int tick = event->midiTime();
 
+            // Exclude original paired notes whose track has moved regions;
+            // the rendered notes are inserted below.
+            if (i < 16 && event->track()) {
+                const int trackIndex = _tracks->indexOf(event->track());
+                if (trackIndex >= 0 && regionTrackHasChanged(trackIndex)) {
+                    if (auto *on = dynamic_cast<NoteOnEvent *>(event)) {
+                        if (on->offEvent()) continue;
+                    } else if (auto *off = dynamic_cast<OffEvent *>(event)) {
+                        if (dynamic_cast<NoteOnEvent *>(off->onEvent())) continue;
+                    }
+                }
+            }
             bool include = true;
             int exportTick = tick - startTick;
 
@@ -1792,6 +2001,14 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
         }
     }
 
+    for (auto it = regionExportNotes.cbegin(); it != regionExportNotes.cend(); ++it) {
+        auto *event = it.value();
+        if (it.key() < startTick || it.key() > actualEnd ||
+            channelMuted(event->channel()) ||
+            (event->track() && event->track()->muted())) continue;
+        allEvents.insert(it.key() - startTick, event);
+    }
+
     // Inject the latest state before startTick to ensure correct instruments and timing
     if (lastTempo) allEvents.insert(0, lastTempo);
     if (lastTimeSig) allEvents.insert(0, lastTimeSig);
@@ -1821,8 +2038,10 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
         data.append((qint8) ((trackL & (0xFF << 8 * i)) >> 8 * i));
     }
 
+    // A format-0 source becomes format 1 when the arrangement adds tracks.
+    const int outputFormat = numTracks() > 1 ? 1 : _midiFormat;
     for (int i = 1; i >= 0; i--) {
-        data.append((qint8) ((_midiFormat & (0xFF << 8 * i)) >> 8 * i));
+        data.append((qint8) ((outputFormat & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
@@ -1899,6 +2118,7 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
     f->close();
     delete stream;
     delete f;
+    qDeleteAll(regionExportOwned);
 
     return true;
 }

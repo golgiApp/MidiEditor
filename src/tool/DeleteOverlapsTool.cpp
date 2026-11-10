@@ -33,6 +33,10 @@
 #include <QSet>
 #include <algorithm>
 
+namespace {
+constexpr int overlapGapTicks = 8;
+}
+
 DeleteOverlapsTool::DeleteOverlapsTool()
     : EventTool() {
     setImage(":/run_environment/graphics/tool/deleteoverlap.png");
@@ -221,10 +225,10 @@ void DeleteOverlapsTool::deleteOverlapsMono(const QList<NoteOnEvent *> &notes, b
                     } else if (currentLength >= laterLength) {
                         // Keep longer note (current), shorten or remove later note
                         if (laterStart < currentEnd) {
-                            // Shorten the later note to start after current note ends
-                            int newStart = currentEnd;
-                            if (newStart < laterEnd - 1) {
-                                laterNote->setMidiTime(newStart, false);
+                            // Preserve at least one tick of the later note.
+                            if (currentEnd < laterEnd - 1) {
+                                const int gap = qMin(overlapGapTicks, laterEnd - 1 - currentEnd);
+                                laterNote->setMidiTime(currentEnd + gap, false);
                             } else {
                                 // Later note would be too short, remove it
                                 notesToRemove.append(laterNote);
@@ -234,7 +238,7 @@ void DeleteOverlapsTool::deleteOverlapsMono(const QList<NoteOnEvent *> &notes, b
                         // Keep longer note (later), shorten current note
                         if (currentEnd > laterStart) {
                             // Shorten current note to end before later note starts
-                            int newEnd = qMax(laterStart - 1, currentStart + 1);
+                            int newEnd = qMax(laterStart - overlapGapTicks, currentStart + 1);
                             currentNote->offEvent()->setMidiTime(newEnd, false);
                             currentEnd = newEnd;
                         }
@@ -310,7 +314,7 @@ void DeleteOverlapsTool::processPolyOverlaps(const QList<NoteOnEvent *> &notes) 
             if (currentEndTime > laterStartTime) {
                 // Shorten the current note to end just before the later note starts
                 // But ensure minimum note length of 1 tick
-                int newEndTime = qMax(laterStartTime - 1, currentNote->midiTime() + 1);
+                int newEndTime = qMax(laterStartTime - overlapGapTicks, currentNote->midiTime() + 1);
                 currentNote->offEvent()->setMidiTime(newEndTime, false);
                 currentEndTime = newEndTime;
                 break; // Once shortened, no need to check further

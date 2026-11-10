@@ -16,7 +16,13 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+// Keep the Windows SDK's min/max macros out of this translation unit.
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include "MatrixWidget.h"
+#include "../region/RegionForceLegato.h"
 #include "../MidiEvent/MidiEvent.h"
 #include <iterator>
 #include "../MidiEvent/NoteOnEvent.h"
@@ -38,6 +44,7 @@
 #include "../tool/EditorTool.h"
 #include "../tool/Selection.h"
 #include "../tool/StandardTool.h"
+#include "../tool/NewNoteTool.h"
 #include "Appearance.h"
 #include "../tool/SelectTool.h"
 #include "../tool/MeasureTool.h"
@@ -45,18 +52,21 @@
 #include "MainWindow.h"
 #include "../support/GMDrumMap.h"
 #include <algorithm>
+#include <limits>
 #include <set>
 #include "../gui/Appearance.h"
 #include "../gui/ChannelVisibilityManager.h"
 #include "../midi/MidiOutput.h"
 
 #include <QList>
+#include <QSet>
 #include <QSettings>
 #include <QApplication>
 #include <QDateTime>
 #include <cmath>
 #include <QContextMenuEvent>
 #include <QMenu>
+#include <QToolTip>
 #include <QInputDialog>
 #include <QWidgetAction>
 #include <QHBoxLayout>
@@ -86,6 +96,7 @@ MatrixWidget::MatrixWidget(QSettings *settings, QWidget *parent)
     scaleX = 1;
     pianoEvent = new NoteOnEvent(0, 100, 0, 0);
     scaleY = 1;
+    _showMidiEventLanes = _settings->value("xiv/show_midi_event_lanes", false).toBool();
     _showGMDrumLabels = _settings->value("ffxiv/gm_drum_labels", false).toBool();
     lineNameWidth = _showGMDrumLabels ? 242 : 110;
     timeHeight = 50;
@@ -206,7 +217,8 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
 
             // BOUNDS CLAMPING
             if (finalStartTime < 0) finalStartTime = 0;
-            int maxStart = file->maxTime() - viewportDurationMs;
+            int maxStart = std::max(file->maxTime(),
+                file->msOfTick(file->arrangementEndTick())) - viewportDurationMs;
             if (finalStartTime > maxStart) finalStartTime = maxStart;
             if (finalStartTime < 0) finalStartTime = 0;
 
@@ -217,7 +229,7 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
                 registerRelayout();
                 update();
                 emit scrollChanged(startTimeX, (file->maxTime() - viewportDurationMs), startLineY,
-                                   NUM_LINES - (endLineY - startLineY));
+                                   std::max(0, lastVisibleLine() - (endLineY - startLineY)));
             } else {
                 endTimeX = startTimeX + viewportDurationMs;
                 update();
@@ -233,7 +245,7 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
 
             // sets the new position and repaints
             emit scrollChanged(ms, (file->maxTime() - endTimeX + startTimeX), startLineY,
-                               NUM_LINES - (endLineY - startLineY));
+                               std::max(0, lastVisibleLine() - (endLineY - startLineY)));
             return;
         }
     }
@@ -251,9 +263,12 @@ void MatrixWidget::scrollXChanged(int scrollPositionX) {
     if (startTimeX < 0) {
         endTimeX -= startTimeX;
         startTimeX = 0;
-    } else if (endTimeX > file->maxTime()) {
-        startTimeX += file->maxTime() - endTimeX;
-        endTimeX = file->maxTime();
+    } else if (endTimeX > std::max(file->maxTime(),
+                        file->msOfTick(file->arrangementEndTick()))) {
+        const int timelineEnd = std::max(file->maxTime(),
+                           file->msOfTick(file->arrangementEndTick()));
+        startTimeX += timelineEnd - endTimeX;
+        endTimeX = timelineEnd;
         if (startTimeX < 0) startTimeX = 0;
     }
 
@@ -262,6 +277,12 @@ void MatrixWidget::scrollXChanged(int scrollPositionX) {
         registerRelayout();
         update();
     }
+}
+
+void MatrixWidget::setMidiEventLanesVisible(bool visible) {
+    if (_showMidiEventLanes == visible) return;
+    _showMidiEventLanes = visible;
+    calcSizes();
 }
 
 void MatrixWidget::scrollYChanged(int scrollPositionY) {
@@ -275,9 +296,9 @@ void MatrixWidget::scrollYChanged(int scrollPositionY) {
     double linesInWidget = space / lineSpace;
     endLineY = startLineY + linesInWidget;
 
-    if (endLineY > NUM_LINES) {
-        int d = endLineY - NUM_LINES;
-        endLineY = NUM_LINES;
+    if (endLineY > lastVisibleLine()) {
+        int d = endLineY - lastVisibleLine();
+        endLineY = lastVisibleLine();
         startLineY -= d;
         if (startLineY < 0) {
             startLineY = 0;
@@ -367,18 +388,22 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
 
         // fill the pianos background
         int pianoKeys = numLines;
-        if (endLineY > 127) {
-            pianoKeys -= (endLineY - 127);
+        if (endLineY > 128) {
+            pianoKeys -= (endLineY - 128);
         }
         if (pianoKeys > 0) {
-            pixpainter->fillRect(0, timeHeight, lineNameWidth - 10,
-                                 pianoKeys * lineHeight(), _cachedPianoWhiteKeyColor);
+            // Keyboard gutter stays ivory even when the surrounding editor is dark.
+            // With GM Drum Labels enabled, reserve the rest for the dark label overlay.
+            const int keyGutterWidth = _showGMDrumLabels ? 72 : (lineNameWidth - 10);
+            pixpainter->fillRect(0, timeHeight, keyGutterWidth,
+                                 pianoKeys * lineHeight(),
+                                 _cachedShouldUseDarkMode ? QColor(248, 249, 252) : _cachedPianoWhiteKeyColor);
         }
 
         // draw background of lines, pianokeys and linenames. when i increase ,the tune decrease.
         // Use cached appearance values to avoid expensive calls during paint
 
-        for (int i = startLineY; i <= endLineY; i++) {
+        for (int i = startLineY; i <= endLineY && (_showMidiEventLanes || i < 128); i++) {
             int startLine = yPosOfLine(i);
             QColor c;
             if (i <= 127) {
@@ -711,7 +736,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
     painter->setRenderHint(QPainter::Antialiasing);
     // draw the piano / linenames
     _pendingKeyLabels.clear();
-    for (int i = startLineY; i <= endLineY; i++) {
+    for (int i = startLineY; i <= endLineY && (_showMidiEventLanes || i < 128); i++) {
         int startLine = yPosOfLine(i);
         if (i >= 0 && i <= 127) {
             // In GM label mode, keep the physical piano keys narrow and reserve
@@ -792,7 +817,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         drumFont.setPixelSize(11);
         painter->setFont(drumFont);
         painter->setClipRect(labelStart, timeHeight, labelWidth, height() - timeHeight);
-        for (int line = startLineY; line <= endLineY; ++line) {
+        for (int line = startLineY; line <= endLineY && (_showMidiEventLanes || line < 128); ++line) {
             const int note = 127 - line;
             const char *name = GMDrumMap::nameForNote(note);
             if (!name) continue;
@@ -830,8 +855,8 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
             int textX = label.keyX + (label.keyW - textW) / 2;
             int textY = label.keyY + (label.keyH + fm.ascent() - fm.descent()) / 2;
 
-            if (label.isBlack || _cachedShouldUseDarkMode) {
-                // Black key or Dark Mode white key: white text with full dark outline (embroidered)
+            if (label.isBlack) {
+                // Black keys: white label with dark outline (even in dark UI mode)
                 painter->setPen(QColor(0, 0, 0, 180));
                 painter->drawText(textX - 1, textY - 1, label.keyName);
                 painter->drawText(textX + 1, textY - 1, label.keyName);
@@ -862,6 +887,54 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
 
         painter->setFont(oldFont);
         painter->setPen(_cachedForegroundColor);
+    }
+
+    // Projected region notes are drawn at ARRANGED MIDI ticks, not source
+    // ticks. This also shows moved, trimmed and repeated notes correctly.
+    if (_regionViewEnabled) {
+        painter->save();
+        painter->setClipRect(QRect(lineNameWidth, timeHeight,
+                                   std::max(0, width() - lineNameWidth),
+                                   std::max(0, height() - timeHeight)));
+        painter->setPen(Qt::NoPen);
+        for (const auto &n : _regionViewNotes) {
+            const int id = n.ownedNoteId ? n.ownedNoteId : n.sourceId;
+            const bool selected = !_regionShowAll && _regionSelection.count(id);
+            if (_regionEditingSafe && !selected) continue;
+            const int line = 127 - n.pitch;
+            if (line < startLineY || line > endLineY) continue;
+            const int begin = xPosOfMs(file->msOfTick(n.startTick));
+            const int end = xPosOfMs(file->msOfTick(n.endTick));
+            if (end <= lineNameWidth || begin >= width()) continue;
+            const int x = std::max(lineNameWidth, begin);
+            const int ex = std::min(width(), end);
+            if (ex <= x) continue;
+            const int y = yPosOfLine(line);
+            const int h = std::max(3, static_cast<int>(lineHeight()) - 2);
+            QColor accent("#7DB8D9");
+            if (n.trackIndex >= 0 && n.trackIndex < file->tracks()->size()) {
+                MidiTrack *track = file->tracks()->at(n.trackIndex);
+                if (track && track->color()) accent = *track->color();
+            }
+            painter->fillRect(QRect(x, y + 1, ex - x, h), accent);
+            painter->setPen(selected ? QColor("#FFE0A4") : QColor("#C8D6E2"));
+            painter->drawRect(QRect(x, y + 1, std::max(0, ex - x - 1),
+                                    std::max(0, h - 1)));
+            painter->setPen(Qt::NoPen);
+        }
+        if (_regionGesture == RegionGesture::Select && !_regionSelectionBox.isEmpty()) {
+            painter->fillRect(_regionSelectionBox, QColor(120, 177, 230, 40));
+            painter->setPen(QColor("#A4CAEB"));
+            painter->drawRect(_regionSelectionBox);
+        }
+        if (!_regionShowAll && _selectedViewRegionId == 0) {
+            painter->setPen(QColor("#BFC7D3"));
+            painter->drawText(QRect(lineNameWidth + 12, timeHeight + 15,
+                                    std::max(0, width() - lineNameWidth - 24), 40),
+                              Qt::AlignLeft | Qt::AlignVCenter,
+                              tr("Select a MIDI region above to display its notes"));
+        }
+        painter->restore();
     }
 
     if (Tool::currentTool()) {
@@ -974,13 +1047,28 @@ void MatrixWidget::paintChannel(QPainter *painter, int channel) {
 
     for (; it != end; ++it) {
         MidiEvent *currentEvent = it.value();
+        if (_regionViewEnabled &&
+            (dynamic_cast<NoteOnEvent *>(currentEvent) ||
+             dynamic_cast<OffEvent *>(currentEvent))) {
+            if (!_regionEditingSafe) continue;
+            const auto *region = _regionViewModel.find(_selectedViewRegionId);
+            auto *on = dynamic_cast<NoteOnEvent *>(currentEvent);
+            if (!on) {
+                auto *off = dynamic_cast<OffEvent *>(currentEvent);
+                on = off ? dynamic_cast<NoteOnEvent *>(off->onEvent()) : nullptr;
+            }
+            if (!region || !on || !on->track() ||
+                file->tracks()->indexOf(on->track()) != region->trackIndex ||
+                on->midiTime() < region->sourceStartTick ||
+                on->midiTime() >= region->sourceEndTick) continue;
+        }
         if (_focusedTrack && currentEvent->track() != _focusedTrack) {
             continue; // Only the selected instrument is shown and hit-testable.
         }
 
         // Fast early rejection: check line visibility first (cheapest test)
         int line = currentEvent->line();
-        if (line < startLineY || line > endLineY) {
+        if (line < startLineY || line > endLineY || (!_showMidiEventLanes && line >= 128)) {
             continue;
         }
 
@@ -1190,6 +1278,19 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
         bool selected = (mouseY >= y && mouseY < y + height && mouseX > lineNameWidth && mouseOver) ||
                         (!Appearance::accentKeyHighlight() && _cachedSelectedRows.contains(127 - number));
 
+        // XIV MIDI Studio: Keep the physical keyboard white and black even in
+        // dark UI themes. Do not change Appearance::pianoWhiteKeyColor(), as
+        // that is also used by the Piano Roll's timeline/ruler background.
+        // This palette applies ONLY to the drawn keyboard keys.
+        const QColor whiteKey = _cachedShouldUseDarkMode ? QColor(248, 249, 252) : _cachedPianoWhiteKeyColor;
+        const QColor blackKey = _cachedShouldUseDarkMode ? QColor(22, 25, 31) : _cachedPianoBlackKeyColor;
+        const QColor whiteHover = _cachedShouldUseDarkMode ? QColor(224, 236, 250) : _cachedPianoWhiteKeyHoverColor;
+        const QColor blackHover = _cachedShouldUseDarkMode ? QColor(55, 65, 83) : _cachedPianoBlackKeyHoverColor;
+        const QColor whiteSelected = _cachedShouldUseDarkMode ? QColor(190, 215, 243) : _cachedPianoWhiteKeySelectedColor;
+        const QColor blackSelected = _cachedShouldUseDarkMode ? QColor(70, 100, 143) : _cachedPianoBlackKeySelectedColor;
+        const QColor whiteActive = _cachedShouldUseDarkMode ? QColor(116, 195, 246) : _cachedPianoWhiteKeyActiveColor;
+        const QColor blackActive = _cachedShouldUseDarkMode ? QColor(42, 136, 203) : _cachedPianoBlackKeyActiveColor;
+
         QPolygon keyPolygon;
 
         bool inRect = false;
@@ -1201,9 +1302,9 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
             playerRect.setY(y);
             playerRect.setWidth(width * scaleWidthBlack);
             playerRect.setHeight(height * scaleHeightBlack + 0.5);
-            QColor c = _cachedPianoBlackKeyColor;
+            QColor c = blackKey;
             inRect = mouseOver && (mouseX <= lineNameWidth) && (number == _lastHoverPianoKey);
-            painter->fillRect(playerRect, inRect ? _cachedPianoBlackKeyHoverColor : (isActive ? _cachedPianoBlackKeyActiveColor : (selected ? _cachedPianoBlackKeySelectedColor : c)));
+            painter->fillRect(playerRect, inRect ? blackHover : (isActive ? blackActive : (selected ? blackSelected : c)));
 
             keyPolygon.append(QPoint(x, y));
             keyPolygon.append(QPoint(x, y + height * scaleHeightBlack));
@@ -1236,30 +1337,30 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
 
         if (isBlack) {
             if (inRect) {
-                painter->setBrush(_cachedPianoBlackKeyHoverColor);
+                painter->setBrush(blackHover);
             } else if (isActive) {
-                painter->setBrush(_cachedPianoBlackKeyActiveColor);
+                painter->setBrush(blackActive);
             } else if (selected) {
-                painter->setBrush(_cachedPianoBlackKeySelectedColor);
+                painter->setBrush(blackSelected);
             } else {
-                painter->setBrush(_cachedPianoBlackKeyColor);
+                painter->setBrush(blackKey);
             }
         } else {
             if (inRect) {
-                painter->setBrush(_cachedPianoWhiteKeyHoverColor);
+                painter->setBrush(whiteHover);
             } else if (isActive) {
-                painter->setBrush(_cachedPianoWhiteKeyActiveColor);
+                painter->setBrush(whiteActive);
             } else if (selected) {
-                painter->setBrush(_cachedPianoWhiteKeySelectedColor);
+                painter->setBrush(whiteSelected);
             } else {
-                painter->setBrush(_cachedPianoWhiteKeyColor);
+                painter->setBrush(whiteKey);
             }
         }
         painter->setPen(_cachedDarkGrayColor);
         painter->drawPolygon(keyPolygon, Qt::OddEvenFill);
 
         if (name != "") {
-            painter->setPen(Qt::gray); // Original color for both modes
+            painter->setPen(_cachedShouldUseDarkMode ? QColor(62, 68, 78) : Qt::gray); // Readable on white key faces
             QFontMetrics fm(painter->font());
             int textlength = fm.horizontalAdvance(name);
 
@@ -1315,6 +1416,12 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
 void MatrixWidget::setFile(MidiFile *f) {
     stopAllEmulationNotes();
     file = f;
+    _regionViewNotes.clear();
+    _regionSelection.clear();
+    _regionGesture = RegionGesture::None;
+    _regionViewEnabled = false;
+    _regionEditingSafe = false;
+    _selectedViewRegionId = 0;
 
     scaleX = 1;
     scaleY = 1;
@@ -1325,6 +1432,14 @@ void MatrixWidget::setFile(MidiFile *f) {
 
     connect(file->protocol(), SIGNAL(actionFinished()), this, SLOT(registerRelayout()));
     connect(file->protocol(), SIGNAL(actionFinished()), this, SLOT(update()));
+    connect(file->protocol(), &Protocol::actionFinished, this, [this]() {
+        if (_regionViewEnabled) {
+            _regionSelection.clear();
+            _regionGesture = RegionGesture::None;
+            refreshRegionViewNotes();
+            update();
+        }
+    });
 
     calcSizes();
 
@@ -1356,7 +1471,8 @@ void MatrixWidget::calcSizes() {
     if (!file) {
         return;
     }
-    int time = file->maxTime();
+    int time = std::max(file->maxTime(),
+                        file->msOfTick(file->arrangementEndTick()));
     int timeInWidget = ((width() - lineNameWidth) * 1000) / (PIXEL_PER_S * scaleX);
 
     // Timeline Ruler is always 50px
@@ -1380,14 +1496,364 @@ void MatrixWidget::calcSizes() {
     registerRelayout();
     update();
 
-    emit sizeChanged(time - timeInWidget, NUM_LINES - endLineY + startLineY, startTimeX, startLineY);
+    emit sizeChanged(time - timeInWidget, lastVisibleLine() - endLineY + startLineY, startTimeX, startLineY);
 }
 
 MidiFile *MatrixWidget::midiFile() {
     return file;
 }
 
+// Display the selected region by default. Region note gestures use the
+// rendered positions and commit a region-local snapshot.
+void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
+                                 int selectedRegionId, bool showAllRegions,
+                                 bool navigate) {
+    const bool changedSelection = _selectedViewRegionId != selectedRegionId ||
+                                  _regionShowAll != showAllRegions;
+    if (changedSelection) _regionSelection.clear();
+    _regionGesture = RegionGesture::None;
+    _regionViewModel = model;
+    _selectedViewRegionId = selectedRegionId;
+    _regionShowAll = showAllRegions;
+    _regionViewEnabled = true;
+    const auto *focusedRegion = _regionViewModel.find(selectedRegionId);
+    // Existing native edit tools remain enabled where their source note
+    // positions still equal the arranged display. Transformed/looped regions
+    // need dedicated region-note IDs before editing may safely be enabled.
+    _regionEditingSafe = !_regionShowAll && focusedRegion && !focusedRegion->ownedNotes &&
+        focusedRegion->startTick == focusedRegion->sourceStartTick &&
+        focusedRegion->loopLengthTicks == 0 && !focusedRegion->quantize.active() &&
+        focusedRegion->endNoteMode == xiv::CrossingNoteMode::Keep &&
+        (focusedRegion->sourceStartTick == 0 ||
+         focusedRegion->startNoteMode == xiv::CrossingNoteMode::Keep);
+    refreshRegionViewNotes();
+
+    if (navigate && changedSelection && file && !showAllRegions) {
+        const auto *region = _regionViewModel.find(selectedRegionId);
+        if (region) {
+            int highestPitch = -1;
+            for (const auto &note : _regionViewNotes)
+                highestPitch = std::max(highestPitch, note.pitch);
+            if (highestPitch >= 0)
+                startLineY = std::clamp(127 - highestPitch - 5, 0, 110);
+            startTimeX = std::max(0, file->msOfTick(region->startTick));
+            calcSizes();
+            emit scrollChanged(startTimeX,
+                std::max(0, std::max(file->maxTime(),
+                    file->msOfTick(file->arrangementEndTick())) -
+                    (endTimeX - startTimeX)),
+                startLineY, std::max(0, lastVisibleLine() - (endLineY-startLineY)));
+        }
+    }
+    registerRelayout();
+    update();
+}
+
+void MatrixWidget::refreshRegionViewNotes() {
+    _regionViewNotes.clear();
+    if (!_regionViewEnabled || !file) return;
+    std::vector<xiv::SourceRegionNote> source;
+    int id = 1;
+    for (int channel = 0; channel < 16; ++channel) {
+        auto *events = file->channelEvents(channel);
+        if (!events) continue;
+        for (auto it = events->cbegin(); it != events->cend(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || !note->track() || !note->offEvent() ||
+                note->velocity() <= 0 ||
+                note->offEvent()->midiTime() <= note->midiTime()) continue;
+            const int index = file->tracks()->indexOf(note->track());
+            if (index < 0) continue;
+            source.push_back({id++, index, note->midiTime(),
+                              note->offEvent()->midiTime(), note->note(),
+                              note->velocity(), note->channel()});
+        }
+    }
+    for (const auto &n : xiv::renderRegionNotes(source, _regionViewModel)) {
+        if (_regionShowAll || n.regionId == _selectedViewRegionId)
+            _regionViewNotes.push_back(n);
+    }
+}
+
+const xiv::MidiRegion *MatrixWidget::editableRegion() const {
+    if (!file || !enabled || !_regionViewEnabled || _regionShowAll ||
+        !commitRegionNotes || MidiPlayer::isPlaying() || MidiInput::recording()) return nullptr;
+    const auto *region = _regionViewModel.find(_selectedViewRegionId);
+    return region && !region->loopLengthTicks && !region->quantize.active() ? region : nullptr;
+}
+
+QRect MatrixWidget::regionNoteRect(const xiv::RenderedRegionNote &note) {
+    const int x = xPosOfMs(file->msOfTick(note.startTick));
+    const int end = xPosOfMs(file->msOfTick(note.endTick));
+    return QRect(x, yPosOfLine(127 - note.pitch), std::max(1, end - x),
+                 std::max(1, static_cast<int>(lineHeight())));
+}
+
+int MatrixWidget::regionEditTick(int x) {
+    x = std::clamp(x, lineNameWidth, std::max(lineNameWidth, width()));
+    if (auto *tool = dynamic_cast<EventTool *>(Tool::currentTool())) {
+        int tick = -1;
+        tool->rasteredX(x, &tick);
+        if (tick >= 0) return tick;
+    }
+    return std::max(0, file->tick(msOfXPos(x)));
+}
+
+std::vector<xiv::OwnedRegionNote> MatrixWidget::regionNotesForEdit(const xiv::MidiRegion &region) const {
+    if (region.ownedNotes) return *region.ownedNotes;
+    std::vector<xiv::OwnedRegionNote> notes;
+    notes.reserve(_regionViewNotes.size());
+    for (const auto &note : _regionViewNotes) {
+        notes.push_back({note.sourceId, note.sourceSliceStartTick, note.sourceSliceEndTick,
+                         note.pitch, note.velocity, note.channel});
+    }
+    return notes;
+}
+
+bool MatrixWidget::beginRegionGesture(QMouseEvent *event) {
+    const QPoint point = event->position().toPoint();
+    if (!_regionViewEnabled || point.x() < lineNameWidth || point.y() < timeHeight ||
+        lineAtY(point.y()) < 0 || lineAtY(point.y()) > 127) return false;
+    if (!editableRegion()) {
+        if (_selectedViewRegionId && !_regionShowAll && !MidiPlayer::isPlaying() && !MidiInput::recording())
+            QToolTip::showText(event->globalPosition().toPoint(),
+                tr("Turn off region quantization or remove the loop extension to edit these notes."), this);
+        return true;
+    }
+    if (event->button() == Qt::RightButton &&
+        !event->modifiers().testFlag(Qt::ControlModifier)) {
+        const auto selectedNote = std::find_if(_regionViewNotes.begin(), _regionViewNotes.end(),
+            [this, &point](const auto &note) {
+                const int id = note.ownedNoteId ? note.ownedNoteId : note.sourceId;
+                return _regionSelection.count(id) && regionNoteRect(note).contains(point);
+            });
+        if (selectedNote != _regionViewNotes.end()) {
+            _regionGesture = RegionGesture::NoteMenu;
+            _regionGestureButton = Qt::RightButton;
+            return true;
+        }
+    }
+    const auto *tool = Tool::currentTool();
+    if (!dynamic_cast<const StandardTool *>(tool) && !dynamic_cast<const NewNoteTool *>(tool) &&
+        !dynamic_cast<const SelectTool *>(tool)) return true;
+    if (event->button() != Qt::LeftButton && event->button() != Qt::RightButton) return true;
+    if (event->button() == Qt::RightButton && event->modifiers().testFlag(Qt::ControlModifier)) return true;
+
+    EventTool::clearSelection();
+    _regionPressPoint = point;
+    _regionGestureButton = event->button();
+    _regionGestureModifiers = event->modifiers();
+    const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
+    if (event->button() == Qt::RightButton || dynamic_cast<const NewNoteTool *>(tool)) {
+        _regionGesture = RegionGesture::Add;
+        return true;
+    }
+    if (!dynamic_cast<const SelectTool *>(tool)) {
+        for (auto it = _regionViewNotes.crbegin(); it != _regionViewNotes.crend(); ++it) {
+            const QRect bounds = regionNoteRect(*it);
+            if (!bounds.contains(point)) continue;
+            const int id = it->ownedNoteId ? it->ownedNoteId : it->sourceId;
+            if (additive && _regionSelection.erase(id)) {
+                update();
+                return true;
+            }
+            if (!additive && !_regionSelection.count(id)) _regionSelection.clear();
+            _regionSelection.insert(id);
+            _regionAnchorId = id;
+            _regionGesture = RegionGesture::Move;
+            if (event->modifiers() == Qt::NoModifier && bounds.width() >= 8) {
+                if (point.x() - bounds.left() <= 2) _regionGesture = RegionGesture::ResizeLeft;
+                else if (bounds.right() - point.x() <= 2) _regionGesture = RegionGesture::ResizeRight;
+            }
+            update();
+            return true;
+        }
+    }
+    if (!additive) _regionSelection.clear();
+    _regionBoxBase = _regionSelection;
+    _regionSelectionBox = QRect();
+    _regionGesture = RegionGesture::Select;
+    update();
+    return true;
+}
+
+void MatrixWidget::updateRegionGesture(const QPoint &point) {
+    if (_regionGesture != RegionGesture::Select || !editableRegion()) return;
+    _regionSelectionBox = QRect(_regionPressPoint, point).normalized();
+    _regionSelection = _regionBoxBase;
+    for (const auto &note : _regionViewNotes) {
+        if (_regionSelectionBox.intersects(regionNoteRect(note)))
+            _regionSelection.insert(note.ownedNoteId ? note.ownedNoteId : note.sourceId);
+    }
+    update();
+}
+
+void MatrixWidget::endRegionGesture(QMouseEvent *event) {
+    const QPoint point = event->position().toPoint();
+    updateRegionGesture(point);
+    const auto gesture = _regionGesture;
+    _regionGesture = RegionGesture::None;
+    _regionSelectionBox = QRect();
+    update();
+    const auto *region = editableRegion();
+    if (!region || gesture == RegionGesture::None || gesture == RegionGesture::Select) return;
+    const int offset = region->sourceStartTick - region->startTick;
+    auto notes = regionNotesForEdit(*region);
+    if (gesture == RegionGesture::Add) {
+        const int start = regionEditTick(_regionPressPoint.x());
+        if (!region->contains(start)) return;
+        const int end = std::clamp(regionEditTick(point.x()), start + 1, region->endTick());
+        const auto *newNoteTool = dynamic_cast<const NewNoteTool *>(Tool::currentTool());
+        const int divisor = newNoteTool ? newNoteTool->effectiveDurationDivisor() : 0;
+        const int duration = std::max(1, file->ticksPerQuarter() * 4 / (divisor > 0 ? divisor : 16));
+        const int defaultEnd = start + std::min(duration, region->endTick() - start);
+        const int pitch = 127 - lineAtY(_regionPressPoint.y());
+        const int channel = std::clamp(NewNoteTool::editChannel(), 0, 15);
+        int id = 0;
+        for (const auto &note : notes) id = std::max(id, note.id);
+        if (id == std::numeric_limits<int>::max()) return;
+        notes.push_back({id + 1, start + offset,
+                         (divisor > 0 || point.x() == _regionPressPoint.x() ? defaultEnd : end) + offset, pitch, 100, channel});
+        commitRegionNotes(region->id, std::move(notes), tr("Add Region Note"));
+        return;
+    }
+
+    if ((point - _regionPressPoint).manhattanLength() < QApplication::startDragDistance()) return;
+    const auto anchor = std::find_if(_regionViewNotes.begin(), _regionViewNotes.end(), [this](const auto &note) {
+        return (note.ownedNoteId ? note.ownedNoteId : note.sourceId) == _regionAnchorId;
+    });
+    if (anchor == _regionViewNotes.end()) return;
+    const int dx = point.x() - _regionPressPoint.x();
+    const int edge = gesture == RegionGesture::ResizeRight ? anchor->endTick : anchor->startTick;
+    int delta = dx == 0 ? 0 : regionEditTick(xPosOfMs(file->msOfTick(edge)) + dx) - edge;
+    int pitchDelta = gesture == RegionGesture::Move
+        ? lineAtY(_regionPressPoint.y()) - lineAtY(point.y()) : 0;
+    if (_regionGestureModifiers.testFlag(Qt::ShiftModifier)) pitchDelta = 0;
+    if (_regionGestureModifiers.testFlag(Qt::AltModifier)) delta = 0;
+
+    int minDelta = std::numeric_limits<int>::min();
+    int maxDelta = std::numeric_limits<int>::max();
+    int minPitch = -127, maxPitch = 127;
+    // Clamp as a group so the relative pitches and timing of a chord survive.
+    for (auto &note : notes) {
+        if (!_regionSelection.count(note.id)) continue;
+        const auto visible = std::find_if(_regionViewNotes.begin(), _regionViewNotes.end(), [&note](const auto &n) {
+            return (n.ownedNoteId ? n.ownedNoteId : n.sourceId) == note.id;
+        });
+        if (visible == _regionViewNotes.end()) continue;
+        note.startTick = visible->sourceSliceStartTick;
+        note.endTick = visible->sourceSliceEndTick;
+        const int length = note.endTick - note.startTick;
+        if (gesture != RegionGesture::ResizeRight)
+            minDelta = std::max(minDelta, region->sourceStartTick - note.startTick);
+        if (gesture == RegionGesture::ResizeLeft)
+            maxDelta = std::min(maxDelta, length - 1);
+        else
+            maxDelta = std::min(maxDelta, std::max(0, region->sourceEndTick - note.endTick));
+        if (gesture == RegionGesture::ResizeRight)
+            minDelta = std::max(minDelta, 1 - length);
+        minPitch = std::max(minPitch, -note.pitch);
+        maxPitch = std::min(maxPitch, 127 - note.pitch);
+    }
+    delta = std::clamp(delta, minDelta, maxDelta);
+    pitchDelta = std::clamp(pitchDelta, minPitch, maxPitch);
+    if (!delta && !pitchDelta) return;
+    for (auto &note : notes) {
+        if (!_regionSelection.count(note.id)) continue;
+        if (gesture != RegionGesture::ResizeRight) note.startTick += delta;
+        if (gesture != RegionGesture::ResizeLeft) note.endTick += delta;
+        note.pitch += pitchDelta;
+    }
+    commitRegionNotes(region->id, std::move(notes),
+        gesture == RegionGesture::Move ? tr("Move Region Notes") : tr("Resize Region Notes"));
+}
+
+bool MatrixWidget::forceLegatoRegionSelection() {
+    return adjustSelectedRegionNoteEnds(false);
+}
+
+bool MatrixWidget::adjustSelectedRegionNoteEnds(bool overlapsOnly) {
+    const auto *region = editableRegion();
+    if (!region || _regionSelection.empty()) return false;
+
+    auto notes = regionNotesForEdit(*region);
+    const auto mode = overlapsOnly ? xiv::RegionNoteEndMode::RemoveOverlap
+                                   : xiv::RegionNoteEndMode::Legato;
+    if (!xiv::adjustRegionNoteEnds(notes, _regionViewNotes, _regionSelection,
+                                   region->sourceEndTick, mode)) return false;
+    commitRegionNotes(region->id, std::move(notes),
+                      overlapsOnly ? tr("Remove Note Overlaps") : tr("Force Legato"));
+    return true;
+}
+
+bool MatrixWidget::deleteRegionSelection() {
+    const auto *region = editableRegion();
+    if (!region || _regionSelection.empty()) return false;
+    auto notes = regionNotesForEdit(*region);
+    const auto end = std::remove_if(notes.begin(), notes.end(), [this](const auto &note) {
+        return _regionSelection.count(note.id) != 0;
+    });
+    if (end == notes.end()) return false;
+    notes.erase(end, notes.end());
+    commitRegionNotes(region->id, std::move(notes), tr("Delete Region Notes"));
+    return true;
+}
+
+// XIV MIDI Studio: pitch-key selection always searches the whole focused track,
+// including notes in other regions and outside the displayed time window.
+void MatrixWidget::selectPitchRange(int low, int high) {
+    if (!file || !Selection::instance()) return;
+    low = std::clamp(low, 0, 127);
+    high = std::clamp(high, 0, 127);
+    if (low > high) std::swap(low, high);
+    if (editableRegion()) {
+        _regionSelection = _regionBoxBase;
+        for (const auto &note : _regionViewNotes) {
+            if (note.pitch >= low && note.pitch <= high)
+                _regionSelection.insert(note.ownedNoteId ? note.ownedNoteId : note.sourceId);
+        }
+    }
+    QList<MidiEvent *> selected = _pitchRangeAdditive ? _pitchRangeExisting : QList<MidiEvent *>();
+    QSet<MidiEvent *> seen(selected.begin(), selected.end());
+    for (int channel = 0; channel < 16; ++channel) {
+        const auto *events = file->channelEvents(channel);
+        if (!events) continue;
+        for (auto it = events->constBegin(); it != events->constEnd(); ++it) {
+            auto *note = dynamic_cast<NoteOnEvent *>(it.value());
+            if (!note || note->velocity() <= 0 || !note->offEvent()) continue;
+            if (_focusedTrack && note->track() != _focusedTrack) continue;
+            if (_regionViewEnabled) {
+                if (!_regionEditingSafe) continue;
+                const auto *region = _regionViewModel.find(_selectedViewRegionId);
+                if (!region || !note->track() ||
+                    file->tracks()->indexOf(note->track()) != region->trackIndex ||
+                    note->midiTime() < region->sourceStartTick ||
+                    note->midiTime() >= region->sourceEndTick) continue;
+            }
+            if (note->note() >= low && note->note() <= high && !seen.contains(note)) {
+                selected.append(note);
+                seen.insert(note);
+            }
+        }
+    }
+    Selection::instance()->setSelection(std::move(selected));
+    if (EditorTool::mainWindow() && EditorTool::mainWindow()->eventWidget())
+        EditorTool::mainWindow()->eventWidget()->reportSelectionChangedByTool();
+    update();
+}
+
 void MatrixWidget::mouseMoveEvent(QMouseEvent *event) {
+    if (_regionGesture != RegionGesture::None) {
+        updateRegionGesture(event->position().toPoint());
+        event->accept();
+        return;
+    }
+    if (_pitchRangeDragging) {
+        const int currentPitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
+        selectPitchRange(_pitchRangeAnchor, currentPitch);
+        event->accept();
+        return;
+    }
     PaintWidget::mouseMoveEvent(event);
 
     if (!enabled) {
@@ -1619,6 +2085,28 @@ void MatrixWidget::leaveEvent(QEvent *event) {
 }
 
 void MatrixWidget::mousePressEvent(QMouseEvent *event) {
+    if (beginRegionGesture(event)) {
+        setFocus(Qt::MouseFocusReason);
+        event->accept();
+        return;
+    }
+    // Left drag on the piano-key gutter selects an inclusive range of pitches.
+    // Alt+left retains the former note-audition shortcut; right click retains
+    // drum-key visual marking and latch operations.
+    if (file && enabled && event->button() == Qt::LeftButton &&
+        mouseInRect(PianoArea) && !(event->modifiers() & Qt::AltModifier)) {
+        const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
+        _pitchRangeDragging = true;
+        _pitchRangeAnchor = pitch;
+        _pitchRangeAdditive = bool(event->modifiers() & Qt::ControlModifier);
+        _pitchRangeExisting = Selection::instance()->selectedEvents();
+        _regionBoxBase = _pitchRangeAdditive ? _regionSelection : std::set<int>{};
+        selectPitchRange(pitch, pitch);
+        grabMouse();
+        event->accept();
+        return;
+    }
+
     EditorTool* currentTool = Tool::currentTool();
 
     // Special case for MeasureTool: Right-Click for context menu, Middle-Click for deletion
@@ -1804,6 +2292,32 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
+    if (_regionGesture == RegionGesture::NoteMenu && event->button() == Qt::RightButton) {
+        _regionGesture = RegionGesture::None;
+        _regionGestureButton = Qt::NoButton;
+        event->accept();
+        QMenu menu(this);
+        QAction *legato = menu.addAction(tr("Force Legato"));
+        QAction *overlap = menu.addAction(tr("Remove Overlaps (8 Ticks)"));
+        QAction *chosen = menu.exec(event->globalPosition().toPoint());
+        if (chosen == legato) forceLegatoRegionSelection();
+        else if (chosen == overlap) adjustSelectedRegionNoteEnds(true);
+        return;
+    }
+    if (_regionGesture != RegionGesture::None && event->button() == _regionGestureButton) {
+        endRegionGesture(event);
+        event->accept();
+        return;
+    }
+    if (_pitchRangeDragging && event->button() == Qt::LeftButton) {
+        _pitchRangeDragging = false;
+        const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
+        selectPitchRange(_pitchRangeAnchor, pitch);
+        releaseMouse();
+        event->accept();
+        return;
+    }
+
     if (_pressedPianoNote != -1 && (event->button() == Qt::LeftButton || event->button() == Qt::RightButton)) {
         qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - _pressedPianoTime;
         if (elapsed < 300) { // Slightly longer 300ms preview for a more musical feel
@@ -1870,6 +2384,15 @@ void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
 
 bool MatrixWidget::takeKeyPressEvent(QKeyEvent *event) {
     if (event->isAutoRepeat()) return false;
+
+    if (_regionViewEnabled && event->modifiers() == Qt::NoModifier &&
+        (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
+        (hasFocus() || (parentWidget() && parentWidget()->hasFocus()))) {
+        if (deleteRegionSelection()) {
+            event->accept();
+            return true;
+        }
+    }
 
     bool handled = false;
     if (Tool::currentTool()) {
@@ -2363,7 +2886,7 @@ void MatrixWidget::zoomVerIn() {
 void MatrixWidget::zoomVerOut() {
     if (scaleY >= 0.2) {
         scaleY -= 0.1;
-        if (height() <= NUM_LINES * lineHeight() * scaleY / (scaleY + 0.1)) {
+        if (height() <= lastVisibleLine() * lineHeight() * scaleY / (scaleY + 0.1)) {
             calcSizes();
         } else {
             scaleY += 0.1;
@@ -2472,7 +2995,7 @@ void MatrixWidget::wheelEvent(QWheelEvent *event) {
 
             scrollXChanged(newStartTime);
             emit scrollChanged(startTimeX, maxTimeInFile - widgetRange, startLineY,
-                               NUM_LINES - (endLineY - startLineY));
+                               std::max(0, lastVisibleLine() - (endLineY - startLineY)));
         }
 
         if (verScrollAmount != 0) {
@@ -2494,7 +3017,7 @@ void MatrixWidget::wheelEvent(QWheelEvent *event) {
             // endline too large handled in scrollYchanged()
             scrollYChanged(newStartLineY);
             emit scrollChanged(startTimeX, maxTimeInFile - widgetRange, startLineY,
-                               NUM_LINES - (endLineY - startLineY));
+                               std::max(0, lastVisibleLine() - (endLineY - startLineY)));
         }
     }
 }
@@ -2509,6 +3032,11 @@ void MatrixWidget::keyReleaseEvent(QKeyEvent *event) {
 
 void MatrixWidget::contextMenuEvent(QContextMenuEvent* event)
 {
+    if (_regionViewEnabled && event->pos().x() >= lineNameWidth &&
+        event->pos().y() >= timeHeight && lineAtY(event->pos().y()) <= 127) {
+        event->accept(); // Region notes do not use source-event commands.
+        return;
+    }
     // Context menu requires Ctrl + Right Click
     if (!(QApplication::keyboardModifiers() & Qt::ControlModifier)) {
         return;

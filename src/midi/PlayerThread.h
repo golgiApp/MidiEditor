@@ -24,6 +24,8 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QHash>
+#include <atomic>
+#include "PlaybackCycle.h"
 
 // Forward declarations
 class MidiFile;
@@ -69,7 +71,9 @@ public:
      * \brief Sets the MIDI file to play.
      * \param f The MidiFile to play
      */
-    void setFile(MidiFile *f);
+    void setFile(MidiFile *f, int startMs, bool recording);
+    static void setCycleRange(xiv::PlaybackCycle range);
+    static xiv::PlaybackCycle cycleRange();
 
     /**
      * \brief Stops playback.
@@ -148,6 +152,10 @@ private:
     QHash<MidiTrack *, QHash<int, int>> activeTrackNotes;
     void silenceMutedTracks();
     void sendTrackEvent(MidiEvent *event);
+    void restorePlaybackState(int startMs, bool rewind);
+    bool sendEventsBetween(int startMs, int endMs);
+    static std::atomic<std::uint64_t> cycleBounds;
+    bool recordingPlayback = false;
 
     /** \brief The MIDI file being played */
     MidiFile *file;
@@ -156,10 +164,11 @@ private:
     QMultiMap<int, MidiEvent *> *events;
 
     /** \brief Timing and position variables */
-    int interval, position, timeoutSinceLastSignal;
+    int interval, timeoutSinceLastSignal;
+    std::atomic<int> position{0};
 
     /** \brief Playback control flag */
-    volatile bool stopped;
+    std::atomic<bool> stopped{false};
 
     /** \brief Timer for playback timing */
     QTimer *timer;
