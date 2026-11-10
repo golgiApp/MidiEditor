@@ -44,8 +44,10 @@
 #include <algorithm>
 #include <QComboBox>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGroupBox>
 #include <QSpinBox>
+#include <QStyle>
 #include <QSignalBlocker>
 #include "../MidiEvent/TempoChangeEvent.h"
 #include <QFontMetrics>
@@ -1115,17 +1117,43 @@ MainWindow::MainWindow(QString initFile)
     auto *controlBar = new QWidget(central);
     controlBar->setObjectName(QStringLiteral("xivControlBar"));
     controlBar->setStyleSheet(QStringLiteral(
-        "QWidget#xivControlBar { background:#242D39; }"
-        "QWidget#xivControlBar QToolButton:checked { background:#1466A2; color:white; }"
-        "QToolButton#xivPosition { background:#16202B; color:#D5E5F7;"
-        " padding:4px 14px; border:1px solid #526173; border-radius:4px; }"));
+        "QWidget#xivControlBar { background:#36383c; border-bottom:1px solid #202124; }"
+        "QWidget#xivControlBar QToolButton { color:#f2f3f4; background:#4a4d52;"
+        " border:1px solid #5e6269; border-radius:4px; padding:0 7px; }"
+        "QWidget#xivControlBar QToolButton:hover:enabled { background:#585d64; }"
+        "QWidget#xivControlBar QToolButton:pressed { background:#303338; }"
+        "QWidget#xivControlBar QToolButton:checked { background:#285b87; border-color:#5185ae; }"
+        "QWidget#xivControlBar QToolButton#xivControlMore { padding-right:17px; }"
+        "QWidget#xivControlBar QToolButton:disabled { color:#9da1a8; background:#3a3d42; }"
+        "QWidget#xivControlBar QToolButton[xivTransport=\"true\"] {"
+        " border-radius:2px; padding:0; }"
+        "QWidget#xivControlBar QToolButton#xivPlay[playing=\"true\"] {"
+        " background:#2d6944; border-color:#518d65; }"
+        "QWidget#xivControlBar QToolButton#xivRecord[recording=\"true\"] {"
+        " background:#78373d; border-color:#aa555c; }"
+        "QWidget#xivControlBar QToolButton#xivPosition {"
+        " background:#161d26; border-color:#566273; padding:0; }"
+        "QWidget#xivControlBar QToolButton#xivPosition:hover:enabled { background:#212d3b; }"
+        "QWidget#xivControlBar QLabel[xivReadout=\"true\"] { color:#d9e8f7;"
+        " background:transparent; font-family:Consolas; font-size:15px; }"
+        "QWidget#xivControlBar QLabel[xivCaption=\"true\"] {"
+        " color:#a5b6cb; background:transparent; font-size:9px; }"
+        "QWidget#xivControlBar QFrame[xivDivider=\"true\"] { background:#37414e; border:none; }"));
     auto *bar = new QHBoxLayout(controlBar);
-    bar->setContentsMargins(9, 5, 9, 5);
-    const auto addControl = [controlBar, bar](QAction *action, bool text = false) {
+    bar->setContentsMargins(8, 5, 8, 5);
+    bar->setSpacing(3);
+    const auto addControl = [controlBar, bar](QAction *action, bool transport = false) {
         auto *button = new QToolButton(controlBar);
         button->setDefaultAction(action);
-        button->setToolButtonStyle(text ? Qt::ToolButtonTextOnly : Qt::ToolButtonIconOnly);
+        button->setToolButtonStyle(transport ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextOnly);
+        button->setIconSize(QSize(16, 16));
+        button->setFixedHeight(30);
+        if (transport) {
+            button->setProperty("xivTransport", true);
+            button->setFixedWidth(32);
+        }
         bar->addWidget(button);
+        return button;
     };
     auto *pianoRollAction = new QAction(tr("Piano Roll"), this);
     pianoRollAction->setCheckable(true);
@@ -1135,8 +1163,8 @@ MainWindow::MainWindow(QString initFile)
         scrollBarArea->setVisible(visible);
         velocityArea->setVisible(visible && _settings->value("control_widget_visible", true).toBool());
     });
-    addControl(inspectorAction, true);
-    addControl(pianoRollAction, true);
+    addControl(inspectorAction);
+    addControl(pianoRollAction);
     if (auto *toolbarAction = _actionMap.value("show_toolbar")) {
         for (auto *menu : toolbarAction->associatedObjects()) {
             auto *viewMenu = qobject_cast<QMenu *>(menu);
@@ -1146,26 +1174,67 @@ MainWindow::MainWindow(QString initFile)
             break;
         }
     }
-    bar->addStretch(1);
-    addControl(_actionMap.value("back_to_begin"));
-    auto *playPause = new QToolButton(controlBar);
-    playPause->setDefaultAction(_actionMap.value("play"));
-    bar->addWidget(playPause);
-    addControl(_actionMap.value("stop"));
+    bar->addSpacing(12);
+    addControl(_actionMap.value("back"), true);
+    addControl(_actionMap.value("forward"), true);
+    addControl(_actionMap.value("stop"), true);
+    auto *playButton = addControl(_actionMap.value("play"), true);
+    playButton->setObjectName(QStringLiteral("xivPlay"));
+    addControl(_actionMap.value("pause"), true);
+    auto *recordButton = addControl(_actionMap.value("record"), true);
+    recordButton->setObjectName(QStringLiteral("xivRecord"));
+    bar->addSpacing(6);
+
     auto *position = new QToolButton(controlBar);
     position->setObjectName(QStringLiteral("xivPosition"));
     position->setToolTip(tr("Jump to a bar and beat"));
+    position->setAccessibleName(tr("Jump to a bar and beat"));
+    position->setFixedSize(196, 34);
+    auto *readouts = new QHBoxLayout(position);
+    readouts->setContentsMargins(3, 0, 3, 0);
+    readouts->setSpacing(0);
+    const auto addReadout = [position, readouts](const QString &caption, int stretch) {
+        if (readouts->count()) {
+            auto *divider = new QFrame(position);
+            divider->setProperty("xivDivider", true);
+            divider->setFixedSize(1, 23);
+            divider->setAttribute(Qt::WA_TransparentForMouseEvents);
+            readouts->addWidget(divider, 0, Qt::AlignVCenter);
+        }
+        auto *cell = new QWidget(position);
+        cell->setAttribute(Qt::WA_TransparentForMouseEvents);
+        auto *column = new QVBoxLayout(cell);
+        column->setContentsMargins(2, 0, 2, 0);
+        column->setSpacing(0);
+        auto *value = new QLabel(QStringLiteral("—"), cell);
+        value->setProperty("xivReadout", true);
+        value->setAlignment(Qt::AlignCenter);
+        column->addWidget(value);
+        auto *label = new QLabel(caption, cell);
+        label->setProperty("xivCaption", true);
+        label->setAlignment(Qt::AlignCenter);
+        column->addWidget(label);
+        readouts->addWidget(cell, stretch);
+        return value;
+    };
+    auto *positionValue = addReadout(tr("BAR · BEAT"), 2);
+    auto *tempoValue = addReadout(tr("BPM"), 1);
+    auto *meterValue = addReadout(tr("METER"), 1);
     bar->addWidget(position);
-    bar->addStretch(1);
+    bar->addSpacing(6);
     auto *snapAction = _actionMap.value("magnet");
+    snapAction->setIconText(tr("Snap"));
     addControl(snapAction);
+    addControl(_actionMap.value("metronome"), true);
+    bar->addStretch(1);
     auto *more = new QToolButton(controlBar);
+    more->setObjectName(QStringLiteral("xivControlMore"));
     more->setText(tr("More"));
+    more->setFixedHeight(30);
     more->setPopupMode(QToolButton::InstantPopup);
     auto *moreMenu = new QMenu(more);
     moreMenu->addAction(_actionMap.value("show_toolbar"));
-    moreMenu->addAction(_actionMap.value("record"));
-    moreMenu->addAction(_actionMap.value("metronome"));
+    moreMenu->addAction(_actionMap.value("back_to_begin"));
     moreMenu->addAction(_actionMap.value("snap_options"));
     moreMenu->addSeparator();
     for (auto *action : {newTrack, _allTracksAudible, _allTracksMute,
@@ -1174,11 +1243,13 @@ MainWindow::MainWindow(QString initFile)
     more->setMenu(moreMenu);
     bar->addWidget(more);
 
-    const auto updatePosition = [this, position](int ms) {
+    const auto updatePosition = [this, position, positionValue, tempoValue, meterValue](int ms) {
         MidiFile *document = _arrangementWidget->midiFile();
         position->setEnabled(document && !MidiInput::recording());
         if (!document) {
-            position->setText(tr("— · —    — BPM    —/—"));
+            positionValue->setText(QStringLiteral("—"));
+            tempoValue->setText(QStringLiteral("—"));
+            meterValue->setText(QStringLiteral("—"));
             return;
         }
         const int tick = MidiPlayer::isPlaying()
@@ -1195,15 +1266,15 @@ MainWindow::MainWindow(QString initFile)
             if (auto *event = dynamic_cast<TempoChangeEvent *>((--tempo).value()))
                 bpm = event->beatsPerQuarter();
         }
-        position->setText(tr("%1.%2    %3 BPM    %4/%5")
-            .arg(measure).arg(1 + (tick - start) / beatTicks)
-            .arg(bpm).arg(numerator).arg(denominator));
+        positionValue->setText(QStringLiteral("%1.%2").arg(measure).arg(1 + (tick - start) / beatTicks));
+        tempoValue->setText(QString::number(bpm));
+        meterValue->setText(QStringLiteral("%1/%2").arg(numerator).arg(denominator));
     };
     _arrangementWidget->positionChanged = updatePosition;
     updatePosition(-1);
-    connect(position, &QToolButton::clicked, this, [this, position, seekArrangementTick]() {
+    connect(position, &QToolButton::clicked, this, [this, positionValue, seekArrangementTick]() {
         if (!file || MidiInput::recording()) return;
-        const QString current = position->text().section(QLatin1Char(' '), 0, 0);
+        const QString current = positionValue->text();
         bool accepted = false;
         const QString target = QInputDialog::getText(this, tr("Go to Position"),
             tr("Bar.beat"), QLineEdit::Normal, current, &accepted).trimmed();
@@ -1229,12 +1300,18 @@ MainWindow::MainWindow(QString initFile)
     // The player object may be replaced for each run. Observe its current state
     // without retaining any connection to a previous PlayerThread.
     auto *transportRefresh = new QTimer(controlBar);
-    connect(transportRefresh, &QTimer::timeout, this, [this, playPause, refreshInspector]() {
-        QAction *action = _actionMap.value(MidiPlayer::isPlaying() ? "pause" : "play");
-        if (playPause->defaultAction() != action) {
-            playPause->setDefaultAction(action);
-            refreshInspector();
-        }
+    connect(transportRefresh, &QTimer::timeout, this, [playButton, recordButton, refreshInspector]() {
+        const auto updateIndicator = [](QToolButton *button, const char *property, bool active) {
+            if (button->property(property).toBool() == active) return false;
+            button->setProperty(property, active);
+            button->style()->unpolish(button);
+            button->style()->polish(button);
+            button->update();
+            return true;
+        };
+        const bool playChanged = updateIndicator(playButton, "playing", MidiPlayer::isPlaying());
+        const bool recordChanged = updateIndicator(recordButton, "recording", MidiInput::recording());
+        if (playChanged || recordChanged) refreshInspector();
     });
     transportRefresh->start(100);
 
