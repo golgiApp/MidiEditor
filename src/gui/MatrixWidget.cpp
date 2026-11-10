@@ -16,6 +16,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+// Keep the Windows SDK's min/max macros out of this translation unit.
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include "MatrixWidget.h"
 #include "../MidiEvent/MidiEvent.h"
 #include <iterator>
