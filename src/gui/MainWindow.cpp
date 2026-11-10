@@ -19,6 +19,9 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QIcon>
@@ -39,6 +42,9 @@
 #include <QTimer>
 #include <QLabel>
 #include <QProgressDialog>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QVBoxLayout>
 
 #include <cmath>
 #include <algorithm>
@@ -631,6 +637,15 @@ MainWindow::MainWindow(QString initFile)
     quantizeTrackRegions->setToolTip(tr("Copy the selected region's quantize settings to every region on this track."));
     trackForm->addRow(quantizeTrackRegions);
     inspectorLayout->addWidget(trackGroup);
+
+    auto *projectGroup = new QGroupBox(tr("Project"), inspector);
+    auto *projectForm = new QFormLayout(projectGroup);
+    auto *quantizeProjectRegions = new QToolButton(projectGroup);
+    quantizeProjectRegions->setText(tr("Quantize Project Regions..."));
+    quantizeProjectRegions->setToolTip(
+        tr("Apply the selected region's grid, strength, and swing to every region in the project."));
+    projectForm->addRow(quantizeProjectRegions);
+    inspectorLayout->addWidget(projectGroup);
     inspectorLayout->addStretch(1);
 
     auto *inspectorScroll = new QScrollArea(arrangementPane);
@@ -751,7 +766,8 @@ MainWindow::MainWindow(QString initFile)
         menu.exec(globalPos);
     };
     const auto refreshInspector = [this, regionName, grid, strength, swing,
-                                   trackName, assignedChannel, instrument, quantizeTrackRegions]() {
+                                   trackName, assignedChannel, instrument, quantizeTrackRegions,
+                                   quantizeProjectRegions]() {
         MidiFile *document = _arrangementWidget->midiFile();
         const auto *region = _arrangementWidget->regionModel().find(
             _arrangementWidget->selectedRegionId());
@@ -798,6 +814,7 @@ MainWindow::MainWindow(QString initFile)
             QString::number(track->assignedChannel() + 1) : tr("—"));
         instrument->setEnabled(hasTrack && editable);
         quantizeTrackRegions->setEnabled(hasTrack && region && editable);
+        quantizeProjectRegions->setEnabled(region && editable);
     };
     _arrangementWidget->inspectorChanged = refreshInspector;
     _arrangementWidget->regionQuantizeRequested = [inspectorAction, grid, refreshInspector]() {
@@ -826,8 +843,29 @@ MainWindow::MainWindow(QString initFile)
             _arrangementWidget->selectedRegionId());
         if (region) {
             const auto settings = region->quantize;
-            _arrangementWidget->applyQuantize(settings, true);
+            _arrangementWidget->applyQuantize(settings, ArrangementWidget::QuantizeScope::Track);
         }
+    });
+    connect(quantizeProjectRegions, &QToolButton::clicked, this, [this, grid]() {
+        if (!_arrangementWidget->canEditQuantize()) return;
+        const auto *region = _arrangementWidget->regionModel().find(
+            _arrangementWidget->selectedRegionId());
+        if (!region) return;
+
+        const QPointer<MidiFile> document = _arrangementWidget->midiFile();
+        const auto settings = region->quantize;
+        const QString prompt = settings.active()
+            ? tr("Apply the selected region's quantization to every region in this project?\n\n"
+                 "Grid: %1\nStrength: %2%\nSwing: %3%")
+                .arg(grid->currentText()).arg(settings.strength).arg(settings.swing)
+            : tr("The selected region's quantization is off or has zero strength. "
+                 "Apply that setting to every region in this project?");
+        if (QMessageBox::question(this, tr("Quantize Project Regions"), prompt,
+                                  QMessageBox::Yes | QMessageBox::Cancel,
+                                  QMessageBox::Cancel) != QMessageBox::Yes ||
+            !document || document.data() != _arrangementWidget->midiFile()) return;
+
+        _arrangementWidget->applyQuantize(settings, ArrangementWidget::QuantizeScope::Project);
     });
     _arrangementWidget->renameTrackRequested = [this](MidiTrack *track) {
         if (track && file && file->tracks()->contains(track)) renameTrack(track->number());
@@ -1550,13 +1588,21 @@ MainWindow::MainWindow(QString initFile)
     // Apply initial visibility bounds for FFXIV Support buttons
     updateGameSupportUI();
 
-    // Load initial file immediately - no need for artificial delay
-    loadInitFile();
-
-    // Check for updates silently on startup
-    if (_settings->value("updater/check_on_startup", true).toBool()) {
-        QTimer::singleShot(2000, this, [this](){ checkForUpdates(true); });
-    }
+    // Wait until the main window is visible so the chooser has a visible owner.
+    QTimer::singleShot(0, this, [this]() {
+        loadInitFile();
+        if (!file) {
+            close();
+            return;
+        }
+        if (!_settings->value("xiv/quick_start_seen", false).toBool()) {
+            if (auto *quickStart = _actionMap.value("xiv_quick_start"))
+                quickStart->trigger();
+        }
+        if (_settings->value("updater/check_on_startup", true).toBool()) {
+            QTimer::singleShot(2000, this, [this]() { checkForUpdates(true); });
+        }
+    });
 
     // Initialize status bar visibility from settings (default off)
     bool showStatusBar = _settings->value("status_bar/visible", true).toBool();
@@ -1657,10 +1703,56 @@ void MainWindow::updatePasteActionState() {
 }
 
 void MainWindow::loadInitFile() {
-    if (_initFile != "")
+    if (!_initFile.isEmpty()) {
         loadFile(_initFile);
-    else
-        newFile();
+        if (!file) newFile();
+        return;
+    }
+
+    const auto recent = std::find_if(_recentFilePaths.cbegin(), _recentFilePaths.cend(),
+        [](const QString &path) { return QFileInfo(path).isFile(); });
+    const QString recentPath = recent == _recentFilePaths.cend() ? QString() : *recent;
+
+    QDialog startup(this);
+    startup.setWindowTitle(tr("Startup"));
+    auto *layout = new QVBoxLayout(&startup);
+    layout->addWidget(new QLabel(tr("What do you want to do?"), &startup));
+
+    auto *openRecent = new QRadioButton(tr("Open the most recent project"), &startup);
+    if (!recentPath.isEmpty()) {
+        const QFontMetrics metrics(openRecent->font());
+        const QString name = metrics.elidedText(QFileInfo(recentPath).fileName(),
+                                                Qt::ElideMiddle, 230);
+        openRecent->setText(tr("Open the most recent project: %1")
+                            .arg(QString(name).replace(QLatin1Char('&'), QStringLiteral("&&"))));
+        openRecent->setToolTip(QStringLiteral("<span>%1</span>")
+                               .arg(QDir::toNativeSeparators(recentPath).toHtmlEscaped()));
+    }
+    openRecent->setEnabled(!recentPath.isEmpty());
+    layout->addWidget(openRecent);
+
+    auto *openExisting = new QRadioButton(tr("Open another existing project..."), &startup);
+    layout->addWidget(openExisting);
+    auto *createEmpty = new QRadioButton(tr("Create a new empty project"), &startup);
+    layout->addWidget(createEmpty);
+    createEmpty->setChecked(true);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         &startup);
+    connect(buttons, &QDialogButtonBox::accepted, &startup, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &startup, &QDialog::reject);
+    buttons->button(QDialogButtonBox::Ok)->setDefault(true);
+    layout->addWidget(buttons);
+
+    // A canceled file picker or a failed open returns to the same choices.
+    while (!file && startup.exec() == QDialog::Accepted) {
+        if (openRecent->isChecked())
+            openFile(recentPath);
+        else if (openExisting->isChecked())
+            load();
+        else
+            newFile();
+    }
 }
 
 void MainWindow::dropEvent(QDropEvent *ev) {
@@ -6514,6 +6606,25 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     QAction *manualAction = new QAction(tr("Manual"), this);
     connect(manualAction, SIGNAL(triggered()), this, SLOT(manual()));
     helpMB->addAction(manualAction);
+
+    auto *quickStartAction = helpMB->addAction(tr("Quick Start"));
+    connect(quickStartAction, &QAction::triggered, this, [this]() {
+        _settings->setValue("xiv/quick_start_seen", true);
+        QMessageBox quickStart(QMessageBox::Information, tr("XIV MIDI Studio Quick Start"),
+            tr("<p><b>Arrange.</b> Drag regions between tracks. Click the ruler to set the "
+               "playhead. Select a region to see its notes in the Piano Roll.</p>"
+               "<p><b>Split and join.</b> Press Ctrl+T in the Arrangement to split at the "
+               "playhead. Shift-click regions, then right-click a region on the destination "
+               "track and choose Join Selected Regions Here.</p>"
+               "<p><b>Quantize.</b> Open the Inspector for a region's grid, strength, and swing. "
+               "Use Quantize Project Regions to apply those settings to every region.</p>"
+               "<p><b>Export.</b> Choose File &gt; Export Arranged MIDI to create a MIDI file "
+               "with your region edits and track names.</p>"),
+            QMessageBox::Ok, this);
+        quickStart.setTextFormat(Qt::RichText);
+        quickStart.exec();
+    });
+    _actionMap["xiv_quick_start"] = quickStartAction;
 
     QAction *checkUpdatesAction = new QAction(tr("Check for Updates"), this);
     connect(checkUpdatesAction, &QAction::triggered, this, [this](){ checkForUpdates(false); });

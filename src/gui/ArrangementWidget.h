@@ -97,23 +97,29 @@ public:
     bool canEditQuantize() const {
         return _file && _regionsReady && !MidiPlayer::isPlaying() && !MidiInput::recording();
     }
-    void applyQuantize(const xiv::RegionQuantize &settings, bool entireTrack = false) {
+    enum class QuantizeScope { Region, Track, Project };
+    void applyQuantize(const xiv::RegionQuantize &settings,
+                       QuantizeScope scope = QuantizeScope::Region) {
         if (!canEditQuantize() || !settings.valid()) return;
-        const auto *selected = _regions.find(_selectedRegionId);
         const int track = _selected ? _file->tracks()->indexOf(_selected) : -1;
         std::vector<int> targets;
-        if (entireTrack) {
-            if (track < 0) return;
-            for (const auto &region : _regions.regions())
-                if (region.trackIndex == track && !(region.quantize == settings))
-                    targets.push_back(region.id);
-        } else if (selected && !(selected->quantize == settings)) {
-            targets.push_back(selected->id);
+        for (const auto &region : _regions.regions()) {
+            const bool inScope = scope == QuantizeScope::Project ||
+                (scope == QuantizeScope::Track && region.trackIndex == track) ||
+                (scope == QuantizeScope::Region && region.id == _selectedRegionId);
+            if (inScope && !(region.quantize == settings)) targets.push_back(region.id);
         }
         if (targets.empty()) return;
+
+        QString description;
+        switch (scope) {
+        case QuantizeScope::Region: description = tr("Quantize Region"); break;
+        case QuantizeScope::Track: description = tr("Quantize Track Regions"); break;
+        case QuantizeScope::Project: description = tr("Quantize Project Regions"); break;
+        }
         ProtocolEntry *before = _regionHistory.copy();
         for (int id : targets) _regions.setQuantize(id, settings);
-        finishRegionEdit(before, entireTrack ? tr("Quantize Track Regions") : tr("Quantize Region"));
+        finishRegionEdit(before, description);
     }
     void setSnapToGrid(bool on) { _snapToGrid = on; update(); }
 
@@ -753,13 +759,10 @@ protected:
                 if (selectTrackRequested) selectTrackRequested(track);
                 if (regionViewChanged) regionViewChanged();
                 QMenu menu(this);
-                QAction *join = nullptr;
-                if (_selectedRegionIds.size() > 1) {
-                    join = menu.addAction(tr("Join Selected Regions Here") + QLatin1Char('\t') +
-                        QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key_J)).toString(QKeySequence::NativeText));
-                    join->setEnabled(!MidiPlayer::isPlaying() && !MidiInput::recording());
-                    menu.addSeparator();
-                }
+                QAction *join = menu.addAction(tr("Join Selected Regions Here") + QLatin1Char('\t') +
+                    QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key_J)).toString(QKeySequence::NativeText));
+                join->setEnabled(_selectedRegionIds.size() > 1 && canEditQuantize());
+                menu.addSeparator();
                 QAction *splitHere = menu.addAction(tr("Split Here"));
                 splitHere->setEnabled(canSplitAt(*region, tick));
                 const int cursorTick = _file->cursorTick();
@@ -777,7 +780,7 @@ protected:
                 QAction *deleteRegionAction = menu.addAction(tr("Delete Region (Backspace)"));
                 deleteRegionAction->setEnabled(!MidiPlayer::isPlaying());
                 QAction *chosen = menu.exec(e->globalPos());
-                if (chosen && chosen == join) joinSelectedRegions(id);
+                if (chosen == join) joinSelectedRegions(id);
                 else if (chosen == splitHere) splitRegion(id, tick);
                 else if (chosen == splitAtCursor) splitSelectedAtPlayhead();
                 else if (chosen == deleteRegionAction) deleteSelectedRegion();
