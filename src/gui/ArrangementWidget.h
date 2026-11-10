@@ -2034,8 +2034,11 @@ private:
             p.drawRoundedRect(QRectF(4, 0, 4, 6), 1, 1);
             break;
         case TrackControl::More:
-            p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
-            p.drawText(r.translated(-r.center()), Qt::AlignCenter, tr("More…"));
+            p.setBrush(p.pen().color());
+            p.setPen(Qt::NoPen);
+            p.drawEllipse(QPointF(-6, 0), 1.5, 1.5);
+            p.drawEllipse(QPointF(0, 0), 1.5, 1.5);
+            p.drawEllipse(QPointF(6, 0), 1.5, 1.5);
             break;
         }
         p.restore();

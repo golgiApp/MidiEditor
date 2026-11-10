@@ -1611,6 +1611,11 @@ MainWindow::MainWindow(QString initFile)
             if (auto *quickStart = _actionMap.value("xiv_quick_start"))
                 quickStart->trigger();
         }
+        // Reapply native maximization after the startup dialogs have closed.
+        QTimer::singleShot(0, this, [this]() {
+            if (isVisible() && !isMinimized() && !isMaximized())
+                showMaximized();
+        });
         if (_settings->value("updater/check_on_startup", true).toBool()) {
             QTimer::singleShot(2000, this, [this]() { checkForUpdates(true); });
         }
