@@ -36,7 +36,7 @@ XIV MIDI Studio brings Meowchestra’s MidiEditor quality-of-life features into 
 
 ## Windows downloads and development status
 
-Check this repository’s **Releases** tab for published Windows builds. The v0.3 feature list above describes the current source. The latest Windows build is still being tested, including cycle playback and the Piano Roll right-click commands.
+Check this repository’s **Releases** tab for published Windows builds. The v0.3 feature list above describes the current source. The latest Windows build is still being tested, including cycle playback and the Piano Roll right-click commands. download link here: https://github.com/golgiApp/XIVMIDIStudio/releases/tag/0.3.2 
 
 The [upstream MidiEditor manual](https://meowchestra.github.io/MidiEditor/manual/) covers basic MIDI editing and setup.
 
