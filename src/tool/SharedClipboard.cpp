@@ -187,3 +187,35 @@ bool SharedClipboard::pasteEvents(MidiFile *targetFile, QList<MidiEvent *> &past
         return fail();
     return true;
 }
+
+bool SharedClipboard::readNotes(int targetTpq, std::vector<xiv::OwnedRegionNote> &notes) {
+    notes.clear();
+    if (targetTpq <= 0 || !hasData()) return false;
+    QByteArray bytes = QApplication::clipboard()->mimeData()->data(MIME_TYPE);
+    QDataStream in(&bytes, QIODevice::ReadOnly);
+    in.setVersion(QDataStream::Qt_6_0);
+    Header header;
+    if (!readHeader(in, header)) return false;
+    std::vector<xiv::OwnedRegionNote> decoded;
+    for (quint32 index = 0; index < header.count; ++index) {
+        quint8 kind = 0;
+        qint32 tick = 0, end = 0, channel = 0;
+        QByteArray event;
+        in >> kind >> tick >> end >> channel >> event;
+        if (in.status() != QDataStream::Ok || channel < 0 || channel > 15 ||
+            event.isEmpty() || event.size() > 4096 ||
+            (kind != kNote && kind != kChannelEvent)) return false;
+        if (kind != kNote) continue;
+        if (tick < 0 || end <= tick || event.size() != 3 ||
+            (quint8(event.at(0)) & 0xF0) != 0x90 || quint8(event.at(1)) > 127 ||
+            quint8(event.at(2)) == 0 || quint8(event.at(2)) > 127) return false;
+        const int start = targetTick(tick, int(header.tpq), targetTpq);
+        const int finish = targetTick(end, int(header.tpq), targetTpq);
+        if (finish <= start) return false;
+        decoded.push_back({static_cast<int>(decoded.size()) + 1, start, finish,
+            quint8(event.at(1)), quint8(event.at(2)), channel});
+    }
+    if (in.status() != QDataStream::Ok || !in.atEnd() || decoded.empty()) return false;
+    notes = std::move(decoded);
+    return true;
+}

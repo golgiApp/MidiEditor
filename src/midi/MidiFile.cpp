@@ -78,26 +78,20 @@ MidiFile::MidiFile() {
     _midiFormat = 1;
 
     _tracks = new QList<MidiTrack *>();
-    MidiTrack *tempoTrack = new MidiTrack(this);
-    tempoTrack->setName(tr("Tempo Track"));
-    tempoTrack->setNumber(0);
-    _tracks->append(tempoTrack);
-
     MidiTrack *instrumentTrack = new MidiTrack(this);
-    instrumentTrack->setName(tr("New Instrument"));
-    instrumentTrack->setNumber(1);
+    instrumentTrack->setName(tr("Untitled track"));
+    instrumentTrack->setNumber(0);
+    instrumentTrack->assignChannel(0);
     _tracks->append(instrumentTrack);
-
-    connect(tempoTrack, SIGNAL(trackChanged()), this, SIGNAL(trackChanged()));
     connect(instrumentTrack, SIGNAL(trackChanged()), this, SIGNAL(trackChanged()));
 
-    // add timesig
-    TimeSignatureEvent *timeSig = new TimeSignatureEvent(18, 4, 2, 24, 8, tempoTrack);
+    // Project tempo and meter are meta-events on the initial MIDI track.
+    // They do not need a separate visible lane.
+    TimeSignatureEvent *timeSig = new TimeSignatureEvent(18, 4, 2, 24, 8, instrumentTrack);
     timeSig->setFile(this);
     channel(18)->eventMap()->insert(0, timeSig);
 
-    // create tempo change
-    TempoChangeEvent *tempoEv = new TempoChangeEvent(17, 500000, tempoTrack);
+    TempoChangeEvent *tempoEv = new TempoChangeEvent(17, 500000, instrumentTrack);
     tempoEv->setFile(this);
     channel(17)->eventMap()->insert(0, tempoEv);
 

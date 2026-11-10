@@ -31,6 +31,7 @@
 #include <QObject>
 #include <QString>
 #include <set>
+#include <map>
 #include <functional>
 #include <QMouseEvent>
 #include <QPainter>
@@ -115,12 +116,27 @@ public:
         update();
     }
     MidiTrack *focusedTrack() const { return _focusedTrack; }
-    // Read-only rendered note projection from the selected MIDI region.
+    // Rendered notes keep the Arrangement timing in both Piano Roll scopes.
     // Do not use source-event hit testing on moved/looped note positions.
     std::function<void(int, std::vector<xiv::OwnedRegionNote>, const QString &)> commitRegionNotes;
     void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
                        bool showAllRegions, bool navigate = false);
     void refreshRegionViewNotes();
+    std::function<void(xiv::MidiRegionModel, const QString &)> commitProjectedRegions;
+    bool allTracksEditing() const { return _regionViewEnabled && _regionShowAll; }
+    bool hasAllTracksSelection() const { return !_allSelection.empty(); }
+    void allTracksSelectAll();
+    bool allTracksDelete() { return deleteAllTracksSelection(); }
+    bool allTracksTranspose(int semitones);
+    const std::vector<xiv::RenderedRegionNote> &allTracksNotes() const { return _regionViewNotes; }
+    const std::vector<int> &allTracksNoteIds() const { return _regionViewIds; }
+    const std::set<int> &allTracksSelection() const { return _allSelection; }
+    unsigned long long allTracksRevision() const { return _allViewRevision; }
+    bool allTracksEditable() const { return canEditAllTracks(); }
+    void selectAllTracksVelocityNote(int id);
+    bool setAllTracksVelocities(const std::map<int, int> &velocities);
+    bool allTracksCopy();
+    bool allTracksPaste();
     bool forceLegatoRegionSelection();
 
     void setGMDrumLabelsVisible(bool show);
@@ -748,6 +764,31 @@ private:
     int _regionAnchorId = 0;
     Qt::MouseButton _regionGestureButton = Qt::NoButton;
     Qt::KeyboardModifiers _regionGestureModifiers = Qt::NoModifier;
+
+    std::vector<xiv::RenderedRegionNote> _regionFullNotes;
+    std::vector<int> _regionViewIds;
+    unsigned long long _allViewRevision = 0;
+    std::set<int> _allSelection, _allBoxBase;
+    RegionGesture _allGesture = RegionGesture::None;
+    QPoint _allPressPoint;
+    Qt::MouseButton _allButton = Qt::NoButton;
+    Qt::KeyboardModifiers _allModifiers = Qt::NoModifier;
+    QRect _allSelectionBox;
+    int _allAnchor = 0;
+    bool canEditAllTracks() const;
+    void updateAllTracksView();
+    std::set<int> allTouchedRegions() const;
+    int allNoteId(const xiv::RenderedRegionNote &note) const;
+    const xiv::RenderedRegionNote *allNoteAt(const QPoint &point);
+    bool beginAllTracksGesture(QMouseEvent *event);
+    void updateAllTracksGesture(const QPoint &point);
+    void endAllTracksGesture(QMouseEvent *event);
+    bool applyAllTracksEdit(RegionGesture gesture, int delta = 0, int pitch = 0);
+    bool adjustAllTracksEnds(bool overlapsOnly);
+    bool deleteAllTracksSelection();
+    bool handleAllTracksShortcut(QKeyEvent *event);
+    bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     const xiv::MidiRegion *editableRegion() const;
     QRect regionNoteRect(const xiv::RenderedRegionNote &note);

@@ -20,6 +20,7 @@
 #include "../MidiEvent/TempoChangeEvent.h"
 
 #include <cmath>
+#include <algorithm>
 
 // The Piano Roll gutter may expand to show the GM drum-note map.
 #define WIDTH 7
@@ -115,7 +116,9 @@ void MiscWidget::paintEvent(QPaintEvent *event) {
     }
 
     // draw contents
-    if (mode == VelocityEditor) {
+    if (projectedVelocityMode()) {
+        paintProjectedVelocity(painter);
+    } else if (mode == VelocityEditor) {
         QList<MidiEvent *> *list = matrixWidget->velocityEvents();
         foreach(MidiEvent* event, *list) {
             // Use global visibility manager to avoid corrupted MidiChannel access
@@ -271,6 +274,12 @@ void MiscWidget::paintEvent(QPaintEvent *event) {
 }
 
 void MiscWidget::mouseMoveEvent(QMouseEvent *event) {
+    if (projectedVelocityMode()) {
+        PaintWidget::mouseMoveEvent(event);
+        projectedVelocityMove(event);
+        return;
+    }
+
     if (edit_mode == SINGLE_MODE) {
         if (mode == VelocityEditor) {
             bool above = dragging;
@@ -352,6 +361,12 @@ void MiscWidget::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void MiscWidget::mousePressEvent(QMouseEvent *event) {
+    if (projectedVelocityMode()) {
+        PaintWidget::mousePressEvent(event);
+        projectedVelocityPress(event);
+        return;
+    }
+
     if (edit_mode == SINGLE_MODE) {
         if (mode == VelocityEditor) {
             // check whether selection has to be changed.
@@ -468,6 +483,12 @@ void MiscWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MiscWidget::mouseReleaseEvent(QMouseEvent *event) {
+    if (projectedVelocityMode()) {
+        PaintWidget::mouseReleaseEvent(event);
+        projectedVelocityRelease(event);
+        return;
+    }
+
     int channelToUse = (mode == TempoEditor) ? 17 : channel;
 
     if (event->button() == Qt::LeftButton) {
@@ -960,6 +981,8 @@ void MiscWidget::leaveEvent(QEvent *event) {
 }
 
 void MiscWidget::resetState() {
+    _projectedVelocityBase.clear();
+    _projectedVelocityDraft.clear();
     dragY = -1;
     dragging = false;
     freeHandCurve.clear();
@@ -1186,4 +1209,120 @@ void MiscWidget::computeMinMax() {
             break;
         }
     }
+}
+
+bool MiscWidget::projectedVelocityMode() const {
+    return mode == VelocityEditor && matrixWidget->allTracksEditing();
+}
+
+void MiscWidget::paintProjectedVelocity(QPainter &painter) {
+    if (_projectedVelocityRevision != matrixWidget->allTracksRevision())
+        _projectedVelocityDraft.clear();
+    const auto &notes = matrixWidget->allTracksNotes();
+    const auto &ids = matrixWidget->allTracksNoteIds();
+    const auto &selected = matrixWidget->allTracksSelection();
+    for (std::size_t i = 0; i < notes.size(); ++i) {
+        const auto &note = notes[i];
+        const int x = matrixWidget->xPosOfMs(matrixWidget->midiFile()->msOfTick(note.startTick))
+            - matrixWidget->pianoGutterWidth();
+        if (x < 0 || x >= width()) continue;
+        const auto draft = _projectedVelocityDraft.find(ids[i]);
+        const int velocity = draft == _projectedVelocityDraft.end() ? note.velocity : draft->second;
+        const int h = height() * velocity / 128;
+        auto *track = matrixWidget->midiFile()->track(note.trackIndex);
+        painter.setBrush(*track->color());
+        painter.setPen(selected.count(ids[i]) ? Appearance::selectionBorderColor() : Appearance::lightGrayColor());
+        painter.drawRoundedRect(x, height() - h, WIDTH, h, 1, 1);
+    }
+}
+
+void MiscWidget::projectedVelocityPress(QMouseEvent *event) {
+    if (event->button() != Qt::LeftButton || !matrixWidget->allTracksEditable()) return;
+    _projectedVelocityRevision = matrixWidget->allTracksRevision();
+    _projectedVelocityBase.clear();
+    _projectedVelocityDraft.clear();
+    if (edit_mode == SINGLE_MODE) {
+        const auto &notes = matrixWidget->allTracksNotes();
+        const auto &ids = matrixWidget->allTracksNoteIds();
+        int hit = 0;
+        for (std::size_t i = 0; i < notes.size(); ++i) {
+            const int x = matrixWidget->xPosOfMs(matrixWidget->midiFile()->msOfTick(notes[i].startTick))
+                - matrixWidget->pianoGutterWidth();
+            const int y = height() - height() * notes[i].velocity / 128;
+            if (QRect(x, y - 5, WIDTH, 10).contains(event->position().toPoint())) hit = ids[i];
+        }
+        matrixWidget->selectAllTracksVelocityNote(hit);
+        if (!hit) return;
+        const auto &selected = matrixWidget->allTracksSelection();
+        for (std::size_t i = 0; i < notes.size(); ++i)
+            if (selected.count(ids[i])) _projectedVelocityBase[ids[i]] = notes[i].velocity;
+        dragY = int(event->position().y());
+        dragging = true;
+    } else if (edit_mode == MOUSE_MODE) {
+        freeHandCurve.clear();
+        freeHandCurve.append({int(event->position().x()), int(event->position().y())});
+        isDrawingFreehand = true;
+    } else if (edit_mode == LINE_MODE) {
+        lineX = int(event->position().x());
+        lineY = int(event->position().y());
+        isDrawingLine = true;
+    }
+    update();
+}
+
+void MiscWidget::projectedVelocityMove(QMouseEvent *event) {
+    if (_projectedVelocityRevision != matrixWidget->allTracksRevision() &&
+        (dragging || isDrawingFreehand || isDrawingLine)) {
+        resetState();
+        return;
+    }
+    if (dragging) {
+        const int delta = 127 * (dragY - int(event->position().y())) / std::max(1, height());
+        for (const auto &[id, velocity] : _projectedVelocityBase)
+            _projectedVelocityDraft[id] = std::clamp(velocity + delta, 1, 127);
+    }
+    if (isDrawingFreehand) {
+        const int x = int(event->position().x());
+        if (freeHandCurve.isEmpty() || x > freeHandCurve.last().first)
+            freeHandCurve.append({x, int(event->position().y())});
+    }
+    setCursor(dragging ? Qt::SizeVerCursor : Qt::ArrowCursor);
+    update();
+}
+
+void MiscWidget::projectedVelocityRelease(QMouseEvent *event) {
+    if (event->button() != Qt::LeftButton) return;
+    if (!matrixWidget->allTracksEditable() ||
+        _projectedVelocityRevision != matrixWidget->allTracksRevision()) {
+        resetState();
+        return;
+    }
+    projectedVelocityMove(event);
+    std::map<int, int> changes;
+    if (dragging) {
+        if (std::abs(dragY - int(event->position().y())) > 3) changes = _projectedVelocityDraft;
+    } else {
+        QList<QPair<int, int>> curve;
+        if (isDrawingFreehand) curve = freeHandCurve;
+        if (isDrawingLine) {
+            curve.append({lineX, lineY});
+            curve.append({int(event->position().x()), int(event->position().y())});
+            if (curve.first().first > curve.last().first) std::swap(curve.first(), curve.last());
+        }
+        if (curve.size() >= 2 && curve.first().first < curve.last().first) {
+            const auto &notes = matrixWidget->allTracksNotes();
+            const auto &ids = matrixWidget->allTracksNoteIds();
+            const auto &selected = matrixWidget->allTracksSelection();
+            for (std::size_t i = 0; i < notes.size(); ++i) {
+                if (!selected.empty() && !selected.count(ids[i])) continue;
+                const int x = matrixWidget->xPosOfMs(matrixWidget->midiFile()->msOfTick(notes[i].startTick))
+                    - matrixWidget->pianoGutterWidth();
+                if (x < curve.first().first || x > curve.last().first) continue;
+                const int velocity = int(127 * (height() - interpolate(curve, x)) / std::max(1, height()));
+                changes[ids[i]] = std::clamp(velocity, 1, 127);
+            }
+        }
+    }
+    resetState();
+    matrixWidget->setAllTracksVelocities(changes);
 }

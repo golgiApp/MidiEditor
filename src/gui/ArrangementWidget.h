@@ -175,6 +175,14 @@ public:
         finishRegionEdit(before, description);
     }
 
+    void replaceProjectedRegions(xiv::MidiRegionModel updated, const QString &description) {
+        if (!canEditQuantize()) return;
+        if (!updated.replaceValidated(updated.regions(), _file->numTracks())) return;
+        auto *before = _regionHistory.copy();
+        _regions = std::move(updated);
+        finishRegionEdit(before, description);
+    }
+
     void zoomTimeline(bool zoomIn) {
         if (!_file) return;
         zoomTimelineAt(zoomIn, headerWidth + std::max(0, width() - headerWidth) / 2);

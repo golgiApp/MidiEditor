@@ -48,6 +48,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <map>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -932,6 +933,12 @@ MainWindow::MainWindow(QString initFile)
                                                 const QString &description) {
         _arrangementWidget->replaceRegionNotes(id, std::move(notes), description);
     };
+    mw_matrixWidget->commitProjectedRegions = [this](xiv::MidiRegionModel model,
+                                                       const QString &description) {
+        _arrangementWidget->replaceProjectedRegions(std::move(model), description);
+    };
+    if (_matrixWidgetContainer != mw_matrixWidget)
+        _matrixWidgetContainer->installEventFilter(mw_matrixWidget);
     _arrangementWidget->regionViewChanged = [this, refreshInspector]() {
         refreshInspector();
         if (!_arrangementWidget || !mw_matrixWidget || !file ||
@@ -1568,6 +1575,10 @@ MainWindow::MainWindow(QString initFile)
             updatePosition(MidiPlayer::isPlaying() ? MidiPlayer::timeMs() : 0);
         }
     });
+    connect(transportRefresh, &QTimer::timeout, this, [this]() {
+        if (mw_matrixWidget && mw_matrixWidget->allTracksEditing())
+            checkEnableActionsForSelection();
+    });
     transportRefresh->start(100);
 
     auto *noteTools = new QToolButton(pianoHeader);
@@ -1873,7 +1884,9 @@ void MainWindow::setFile(MidiFile *newFile) {
     updateChannelMenu();
     updateTrackMenu();
     if (newFile && newFile->numTracks() > 0) {
-        const int focusIndex = std::min(1, newFile->numTracks() - 1);
+        int focusIndex = 0;
+        if (_arrangementWidget && !_arrangementWidget->regionModel().regions().empty())
+            focusIndex = _arrangementWidget->regionModel().regions().front().trackIndex;
         editTrack(focusIndex, false);
     }
     _matrixWidgetContainer->update();
@@ -2688,11 +2701,10 @@ void MainWindow::newFile() {
 
     // create new File
     MidiFile *f = new MidiFile();
-    f->track(1)->assignChannel(0);
 
     setFile(f);
 
-    editTrack(1);
+    editTrack(0);
     setWindowTitle(QApplication::applicationName() + tr(" - Untitled Document[*]"));
 }
 
@@ -3021,6 +3033,10 @@ void MainWindow::resetView() {
 }
 
 void MainWindow::deleteSelectedEvents() {
+    if (mw_matrixWidget->allTracksEditing()) {
+        mw_matrixWidget->allTracksDelete();
+        return;
+    }
     bool showsSelected = false;
     if (Tool::currentTool()) {
         EventTool *eventTool = dynamic_cast<EventTool *>(Tool::currentTool());
@@ -3663,6 +3679,10 @@ void MainWindow::selectAllFromTrack(QAction *action) {
 }
 
 void MainWindow::selectAll() {
+    if (mw_matrixWidget->allTracksEditing()) {
+        mw_matrixWidget->allTracksSelectAll();
+        return;
+    }
     if (!file) {
         return;
     }
@@ -4756,6 +4776,14 @@ void MainWindow::transposeNSemitones() {
         return;
     }
 
+    if (mw_matrixWidget->allTracksEditing()) {
+        bool accepted = false;
+        const int semitones = QInputDialog::getInt(this, tr("Transpose Notes"),
+            tr("Semitones"), 0, -127, 127, 1, &accepted);
+        if (accepted) mw_matrixWidget->allTracksTranspose(semitones);
+        return;
+    }
+
     QList<NoteOnEvent *> events;
     foreach(MidiEvent* event, Selection::instance()->selectedEvents()) {
         NoteOnEvent *on = dynamic_cast<NoteOnEvent *>(event);
@@ -4775,6 +4803,18 @@ void MainWindow::transposeNSemitones() {
 
 void MainWindow::setVelocityDialog() {
     if (!file) {
+        return;
+    }
+
+    if (mw_matrixWidget->allTracksEditing()) {
+        bool accepted = false;
+        const int velocity = QInputDialog::getInt(this, tr("Set Velocity"),
+            tr("Velocity"), 100, 1, 127, 1, &accepted);
+        if (accepted) {
+            std::map<int, int> values;
+            for (int id : mw_matrixWidget->allTracksSelection()) values[id] = velocity;
+            mw_matrixWidget->setAllTracksVelocities(values);
+        }
         return;
     }
 
@@ -4839,10 +4879,18 @@ void MainWindow::transposeSelection(int semitones) {
 }
 
 void MainWindow::copy() {
+    if (mw_matrixWidget->allTracksEditing()) {
+        mw_matrixWidget->allTracksCopy();
+        return;
+    }
     EventTool::copyAction();
 }
 
 void MainWindow::paste() {
+    if (mw_matrixWidget->allTracksEditing()) {
+        mw_matrixWidget->allTracksPaste();
+        return;
+    }
     EventTool::pasteAction();
 }
 
@@ -4850,7 +4898,7 @@ void MainWindow::pasteAt(int tick) {
     if (!file) return;
     int oldTick = file->cursorTick();
     file->setCursorTick(tick);
-    EventTool::pasteAction();
+    paste();
     file->setCursorTick(oldTick);
 }
 
@@ -7921,6 +7969,13 @@ void MainWindow::checkEnableActionsForSelection() {
     foreach(QAction* action, _activateWithSelections) {
         action->setEnabled(enabled);
     }
+    if (mw_matrixWidget && mw_matrixWidget->allTracksEditing()) {
+        const bool projected = mw_matrixWidget->hasAllTracksSelection() &&
+            !MidiPlayer::isPlaying() && !MidiInput::recording();
+        for (const auto *id : {"copy", "delete", "transpose", "transpose_up", "transpose_down", "set_velocity"}) {
+            if (auto *action = _actionMap.value(id)) action->setEnabled(projected);
+        }
+    }
     if (_moveSelectedEventsToChannelMenu) {
         _moveSelectedEventsToChannelMenu->setEnabled(enabled);
     }
@@ -8198,10 +8253,18 @@ void MainWindow::navigateSelectionRight() {
 }
 
 void MainWindow::transposeSelectedNotesOctaveUp() {
+    if (mw_matrixWidget->allTracksEditing()) {
+        mw_matrixWidget->allTracksTranspose(12);
+        return;
+    }
     transposeSelection(12);
 }
 
 void MainWindow::transposeSelectedNotesOctaveDown() {
+    if (mw_matrixWidget->allTracksEditing()) {
+        mw_matrixWidget->allTracksTranspose(-12);
+        return;
+    }
     transposeSelection(-12);
 }
 

@@ -15,7 +15,7 @@ namespace MML {
 MidiFile* MmlMidiWriter::BuildMidiFile(const std::vector<MmlEvent>& events, int ppq) {
     MidiFile* midiFile = new MidiFile();
     
-    // Create tempo track 0
+    // Keep project meta-events on the initial instrument track.
     MidiTrack* tempoTrack = midiFile->track(0);
 
     std::map<int, std::vector<MmlEvent>> trackGroup;
@@ -35,14 +35,12 @@ MidiFile* MmlMidiWriter::BuildMidiFile(const std::vector<MmlEvent>& events, int 
 
     OffEvent::clearOnEvents(); // prevents dangling GUI ties
 
+    int trackIdx = 0;
     for (const auto& pair : trackGroup) {
         int ch = pair.first;
-        // Channel 0 maps to Track 1, Channel 1 to Track 2...
-        int trackIdx = ch + 1;
-        while (midiFile->numTracks() <= trackIdx) {
-            midiFile->addTrack();
-        }
-        MidiTrack* track = midiFile->track(trackIdx);
+        if (trackIdx >= midiFile->numTracks()) midiFile->addTrack();
+        MidiTrack* track = midiFile->track(trackIdx++);
+        track->assignChannel(ch);
 
         for (const auto& e : pair.second) {
             switch (e.Type) {

@@ -20,6 +20,7 @@
 #define MISCWIDGET_H_
 
 // Project includes
+#include <map>
 #include "PaintWidget.h"
 
 // Qt includes
@@ -166,6 +167,14 @@ protected:
 private:
     /** \brief Reference to the parent matrix widget */
     MatrixWidget *matrixWidget;
+    std::map<int, int> _projectedVelocityBase, _projectedVelocityDraft;
+    unsigned long long _projectedVelocityRevision = 0;
+    bool projectedVelocityMode() const;
+    void paintProjectedVelocity(QPainter &painter);
+    void projectedVelocityPress(QMouseEvent *event);
+    void projectedVelocityMove(QMouseEvent *event);
+    void projectedVelocityRelease(QMouseEvent *event);
+
 
     /** \brief Edit mode (SINGLE_MODE or LINE_MODE) */
     int edit_mode;

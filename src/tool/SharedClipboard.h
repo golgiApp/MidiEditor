@@ -11,6 +11,7 @@
 #include <QObject>
 #include <QList>
 #include <QByteArray>
+#include "../region/MidiRegionModel.h"
 
 class MidiEvent;
 class MidiFile;
@@ -23,6 +24,7 @@ public:
     bool copyEvents(const QList<MidiEvent *> &events, MidiFile *sourceFile);
     bool pasteEvents(MidiFile *targetFile, QList<MidiEvent *> &pastedEvents,
                      bool applyTempoConversion = true, int targetCursorTick = 0);
+    bool readNotes(int targetTpq, std::vector<xiv::OwnedRegionNote> &notes);
     bool hasData();
     bool hasDataFromDifferentProcess();
     void clear();
