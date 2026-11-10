@@ -148,14 +148,24 @@ public:
         finishRegionEdit(before, description);
     }
 
+    void setRulerZoomControls(QWidget *controls) {
+        _rulerZoom = controls;
+        positionRulerZoom();
+    }
+
+    void zoomTimeline(bool zoomIn) {
+        if (!_file) return;
+        zoomTimelineAt(zoomIn, headerWidth + std::max(0, width() - headerWidth) / 2);
+    }
+
     void setRulerTop(int top) {
         if (top == _rulerTop) return;
         _rulerTop = top;
+        positionRulerZoom();
         update();
     }
 
-    // Two rows of large, readable named actions rather than tiny single letters.
-    static constexpr int laneHeight = 114;
+    static constexpr int laneHeight = 84;
 
     void setFile(MidiFile *file) {
         _file = file;
@@ -351,6 +361,7 @@ protected:
     }
     void resizeEvent(QResizeEvent *event) override {
         QWidget::resizeEvent(event);
+        positionRulerZoom();
         refreshHorizontalRange();
     }
 
@@ -439,13 +450,11 @@ protected:
             p.drawText(14, y + 44, QStringLiteral("Track %1   |   Channel %2")
                        .arg(i + 1).arg(t->assignedChannel() + 1));
 
-            drawButton(p, instrumentRect(y), QStringLiteral("Instrument  \u25be"), false, QColor("#45647F"));
-
-            // Keep the common track controls beside its instrument selector.
-            drawButton(p, visibilityRect(y), QStringLiteral("Show"), !t->hidden(), QColor("#1767A4"));
-            drawButton(p, muteRect(y), QStringLiteral("Mute"), t->muted(), QColor("#A83C4B"));
-            drawButton(p, soloRect(y), QStringLiteral("Solo"), t == _solo, QColor("#9B761D"));
-            drawButton(p, actionsRect(y), QStringLiteral("More..."), false, QColor("#55748E"));
+            drawButton(p, instrumentRect(y), TrackControl::Instrument, false, QColor("#45647F"));
+            drawButton(p, visibilityRect(y), TrackControl::Visibility, !t->hidden(), QColor("#1767A4"));
+            drawButton(p, muteRect(y), TrackControl::Mute, t->muted(), QColor("#A83C4B"));
+            drawButton(p, soloRect(y), TrackControl::Solo, t == _solo, QColor("#9B761D"));
+            drawButton(p, actionsRect(y), TrackControl::More, false, QColor("#55748E"));
 
             const auto &notes = _preview[t];
             // Draw region backgrounds first; note previews are rendered later
@@ -548,7 +557,7 @@ protected:
                     const int ex = std::min(width() - 3,
                         xForMs(_file->msOfTick(note.endTick)));
                     if (ex <= sx) continue;
-                    const int ny = y + 96 - (note.pitch - lowestPitch) * 62 / pitchRange;
+                    const int ny = y + laneHeight - 17 - (note.pitch - lowestPitch) * (laneHeight - 52) / pitchRange;
                     p.drawRect(QRect(sx, ny, std::max(1, ex - sx), 4));
                 }
                 p.restore();
@@ -989,15 +998,7 @@ protected:
     }
     void wheelEvent(QWheelEvent *e) override {
         if (e->modifiers() & Qt::ControlModifier) {
-            const double factor = e->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
-            // Keep the time beneath the mouse fixed while zooming.
-            const int x = std::clamp(int(e->position().x()), headerWidth, width());
-            const double anchorMs = _originMs + (x - headerWidth) / _scale;
-            _scale = std::clamp(_scale * factor, 0.004, 0.7);
-            _originMs = std::clamp(int(std::round(anchorMs - (x - headerWidth) / _scale)),
-                                   0, maxOriginMs());
-            refreshHorizontalRange();
-            if (scrollTimeRequested) scrollTimeRequested(_originMs);
+            zoomTimelineAt(e->angleDelta().y() > 0, int(e->position().x()));
         } else if (e->modifiers() & Qt::ShiftModifier) {
             _originMs = std::clamp(_originMs - int(e->angleDelta().y() * 4 / _scale),
                                    0, maxOriginMs());
@@ -1077,6 +1078,26 @@ private:
     int _selectedRegionId = 0;
 
     int _rulerTop = 0;
+    QPointer<QWidget> _rulerZoom;
+
+    void positionRulerZoom() {
+        if (!_rulerZoom) return;
+        const int left = width() - _rulerZoom->width() - 5;
+        _rulerZoom->setVisible(left > headerWidth);
+        _rulerZoom->move(left, _rulerTop + (rulerHeight - _rulerZoom->height()) / 2);
+    }
+
+    void zoomTimelineAt(bool zoomIn, int x) {
+        x = std::clamp(x, headerWidth, std::max(headerWidth, width()));
+        const double anchorMs = _originMs + (x - headerWidth) / _scale;
+        _scale = std::clamp(_scale * (zoomIn ? 1.2 : 1.0 / 1.2), 0.004, 0.7);
+        _originMs = std::clamp(int(std::round(anchorMs - (x - headerWidth) / _scale)),
+                               0, maxOriginMs());
+        refreshHorizontalRange();
+        if (scrollTimeRequested) scrollTimeRequested(_originMs);
+        update();
+    }
+
 
     bool isLaneY(int y) const { return y >= _rulerTop + rulerHeight; }
 
@@ -1091,7 +1112,8 @@ private:
         p.setPen(QColor("#515966"));
         p.drawLine(0, rulerHeight - 1, width(), rulerHeight - 1);
         p.drawLine(headerWidth, 0, headerWidth, rulerHeight);
-        p.setClipRect(QRect(headerWidth, 0, std::max(0, width() - headerWidth), rulerHeight));
+        const int right = _rulerZoom && !_rulerZoom->isHidden() ? _rulerZoom->x() - 4 : width();
+        p.setClipRect(QRect(headerWidth, 0, std::max(0, right - headerWidth), rulerHeight));
         p.setPen(QColor("#C4CCD9"));
         if (!_file)
             p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, rulerHeight),
@@ -1402,8 +1424,8 @@ private:
         return nullptr;
     }
     QPainterPath loopOutline(const QRect &bounds, int startTick, int endTick, int period) const {
-        constexpr int halfWidth = 5;
-        constexpr int depth = 4;
+        constexpr int halfWidth = 7;
+        constexpr int depth = 8;
         QVector<int> seams;
         // Start near the viewport, retaining one earlier boundary to absorb
         // rounding when converting between ticks and whole milliseconds.
@@ -1437,24 +1459,57 @@ private:
     }
 
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
-    // Hit targets match the painted buttons. Do not overlap the track name.
-    QRect instrumentRect(int y) const { return QRect(13, y + 49, 299, 27); }
-    QRect visibilityRect(int y) const { return QRect(13, y + 80, 67, 27); }
-    QRect muteRect(int y) const { return QRect(87, y + 80, 66, 27); }
-    QRect soloRect(int y) const { return QRect(160, y + 80, 67, 27); }
-    QRect actionsRect(int y) const { return QRect(236, y + 80, 76, 27); }
-    static void drawButton(QPainter &p, const QRect &r, const QString &label,
+    enum class TrackControl { Instrument, Visibility, Mute, Solo, More };
+    // The same rectangles are used for painting, hit testing, and tooltips.
+    QRect instrumentRect(int y) const { return QRect(13, y + 49, 43, 24); }
+    QRect visibilityRect(int y) const { return QRect(61, y + 49, 29, 24); }
+    QRect muteRect(int y) const { return QRect(95, y + 49, 29, 24); }
+    QRect soloRect(int y) const { return QRect(129, y + 49, 29, 24); }
+    QRect actionsRect(int y) const { return QRect(163, y + 49, 66, 24); }
+    static void drawButton(QPainter &p, const QRect &r, TrackControl control,
                            bool active, const QColor &accent) {
         p.save();
-        p.setRenderHint(QPainter::Antialiasing, true);
-        // Off means available but inactive, NOT disabled. A stronger border,
-        // contrast and text make the buttons readable on dark Windows themes.
+        p.setRenderHint(QPainter::Antialiasing);
         p.setPen(QPen(active ? accent.lighter(145) : QColor("#62748A"), 1));
         p.setBrush(active ? accent : QColor("#344252"));
-        p.drawRoundedRect(r, 6, 6);
-        p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
-        p.setPen(QColor("#F5F8FC"));
-        p.drawText(r, Qt::AlignCenter, label);
+        p.drawRoundedRect(r, 5, 5);
+        p.setPen(QPen(QColor("#F5F8FC"), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        p.translate(r.center());
+        switch (control) {
+        case TrackControl::Instrument:
+            p.drawRect(QRectF(-13, -6, 15, 12));
+            p.drawLine(QPointF(-8, -6), QPointF(-8, 6));
+            p.drawLine(QPointF(-3, -6), QPointF(-3, 6));
+            p.drawLine(QPointF(7, -1), QPointF(10, 2));
+            p.drawLine(QPointF(10, 2), QPointF(13, -1));
+            break;
+        case TrackControl::Visibility: {
+            QPainterPath eye;
+            eye.moveTo(-8, 0);
+            eye.quadTo(0, -10, 8, 0);
+            eye.quadTo(0, 10, -8, 0);
+            p.drawPath(eye);
+            p.drawEllipse(QPointF(0, 0), 2.4, 2.4);
+            if (!active) p.drawLine(QPointF(-7, 6), QPointF(7, -6));
+            break;
+        }
+        case TrackControl::Mute:
+            p.drawPolygon(QPolygonF{QPointF(-8, -3), QPointF(-5, -3), QPointF(0, -7),
+                                    QPointF(0, 7), QPointF(-5, 3), QPointF(-8, 3)});
+            p.drawLine(QPointF(3, -3), QPointF(8, 3));
+            p.drawLine(QPointF(3, 3), QPointF(8, -3));
+            break;
+        case TrackControl::Solo:
+            p.drawArc(QRectF(-7, -7, 14, 14), 0, 180 * 16);
+            p.drawRoundedRect(QRectF(-8, 0, 4, 6), 1, 1);
+            p.drawRoundedRect(QRectF(4, 0, 4, 6), 1, 1);
+            break;
+        case TrackControl::More:
+            p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+            p.drawText(r.translated(-r.center()), Qt::AlignCenter, tr("More…"));
+            break;
+        }
         p.restore();
     }
 };

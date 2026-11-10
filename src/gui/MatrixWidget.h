@@ -247,6 +247,7 @@ public:
 
     /** \brief Total number of MIDI lines (128 notes + special event lines) */
     static const int NUM_LINES = 139;
+    void setMidiEventLanesVisible(bool visible);
 
     /** \brief Horizontal scaling constant: pixels per second at 1.0 zoom */
     static const int PIXEL_PER_S = 100;
@@ -734,6 +735,8 @@ private:
     int _selectedViewRegionId = 0;
     bool _regionViewEnabled = false;
     bool _regionShowAll = false;
+    bool _showMidiEventLanes = false;
+    int lastVisibleLine() const { return _showMidiEventLanes ? NUM_LINES : 128; }
     bool _regionEditingSafe = false;
     enum class RegionGesture { None, Select, Move, ResizeLeft, ResizeRight, Add };
     RegionGesture _regionGesture = RegionGesture::None;

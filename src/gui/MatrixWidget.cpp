@@ -95,6 +95,7 @@ MatrixWidget::MatrixWidget(QSettings *settings, QWidget *parent)
     scaleX = 1;
     pianoEvent = new NoteOnEvent(0, 100, 0, 0);
     scaleY = 1;
+    _showMidiEventLanes = _settings->value("xiv/show_midi_event_lanes", false).toBool();
     _showGMDrumLabels = _settings->value("ffxiv/gm_drum_labels", false).toBool();
     lineNameWidth = _showGMDrumLabels ? 242 : 110;
     timeHeight = 50;
@@ -227,7 +228,7 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
                 registerRelayout();
                 update();
                 emit scrollChanged(startTimeX, (file->maxTime() - viewportDurationMs), startLineY,
-                                   NUM_LINES - (endLineY - startLineY));
+                                   std::max(0, lastVisibleLine() - (endLineY - startLineY)));
             } else {
                 endTimeX = startTimeX + viewportDurationMs;
                 update();
@@ -243,7 +244,7 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
 
             // sets the new position and repaints
             emit scrollChanged(ms, (file->maxTime() - endTimeX + startTimeX), startLineY,
-                               NUM_LINES - (endLineY - startLineY));
+                               std::max(0, lastVisibleLine() - (endLineY - startLineY)));
             return;
         }
     }
@@ -277,6 +278,12 @@ void MatrixWidget::scrollXChanged(int scrollPositionX) {
     }
 }
 
+void MatrixWidget::setMidiEventLanesVisible(bool visible) {
+    if (_showMidiEventLanes == visible) return;
+    _showMidiEventLanes = visible;
+    calcSizes();
+}
+
 void MatrixWidget::scrollYChanged(int scrollPositionY) {
     if (!file)
         return;
@@ -288,9 +295,9 @@ void MatrixWidget::scrollYChanged(int scrollPositionY) {
     double linesInWidget = space / lineSpace;
     endLineY = startLineY + linesInWidget;
 
-    if (endLineY > NUM_LINES) {
-        int d = endLineY - NUM_LINES;
-        endLineY = NUM_LINES;
+    if (endLineY > lastVisibleLine()) {
+        int d = endLineY - lastVisibleLine();
+        endLineY = lastVisibleLine();
         startLineY -= d;
         if (startLineY < 0) {
             startLineY = 0;
@@ -380,8 +387,8 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
 
         // fill the pianos background
         int pianoKeys = numLines;
-        if (endLineY > 127) {
-            pianoKeys -= (endLineY - 127);
+        if (endLineY > 128) {
+            pianoKeys -= (endLineY - 128);
         }
         if (pianoKeys > 0) {
             // Keyboard gutter stays ivory even when the surrounding editor is dark.
@@ -395,7 +402,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         // draw background of lines, pianokeys and linenames. when i increase ,the tune decrease.
         // Use cached appearance values to avoid expensive calls during paint
 
-        for (int i = startLineY; i <= endLineY; i++) {
+        for (int i = startLineY; i <= endLineY && (_showMidiEventLanes || i < 128); i++) {
             int startLine = yPosOfLine(i);
             QColor c;
             if (i <= 127) {
@@ -728,7 +735,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
     painter->setRenderHint(QPainter::Antialiasing);
     // draw the piano / linenames
     _pendingKeyLabels.clear();
-    for (int i = startLineY; i <= endLineY; i++) {
+    for (int i = startLineY; i <= endLineY && (_showMidiEventLanes || i < 128); i++) {
         int startLine = yPosOfLine(i);
         if (i >= 0 && i <= 127) {
             // In GM label mode, keep the physical piano keys narrow and reserve
@@ -809,7 +816,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         drumFont.setPixelSize(11);
         painter->setFont(drumFont);
         painter->setClipRect(labelStart, timeHeight, labelWidth, height() - timeHeight);
-        for (int line = startLineY; line <= endLineY; ++line) {
+        for (int line = startLineY; line <= endLineY && (_showMidiEventLanes || line < 128); ++line) {
             const int note = 127 - line;
             const char *name = GMDrumMap::nameForNote(note);
             if (!name) continue;
@@ -1060,7 +1067,7 @@ void MatrixWidget::paintChannel(QPainter *painter, int channel) {
 
         // Fast early rejection: check line visibility first (cheapest test)
         int line = currentEvent->line();
-        if (line < startLineY || line > endLineY) {
+        if (line < startLineY || line > endLineY || (!_showMidiEventLanes && line >= 128)) {
             continue;
         }
 
@@ -1488,7 +1495,7 @@ void MatrixWidget::calcSizes() {
     registerRelayout();
     update();
 
-    emit sizeChanged(time - timeInWidget, NUM_LINES - endLineY + startLineY, startTimeX, startLineY);
+    emit sizeChanged(time - timeInWidget, lastVisibleLine() - endLineY + startLineY, startTimeX, startLineY);
 }
 
 MidiFile *MatrixWidget::midiFile() {
@@ -1534,7 +1541,7 @@ void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
                 std::max(0, std::max(file->maxTime(),
                     file->msOfTick(file->arrangementEndTick())) -
                     (endTimeX - startTimeX)),
-                startLineY, std::max(0, NUM_LINES - (endLineY-startLineY)));
+                startLineY, std::max(0, lastVisibleLine() - (endLineY-startLineY)));
         }
     }
     registerRelayout();
@@ -2835,7 +2842,7 @@ void MatrixWidget::zoomVerIn() {
 void MatrixWidget::zoomVerOut() {
     if (scaleY >= 0.2) {
         scaleY -= 0.1;
-        if (height() <= NUM_LINES * lineHeight() * scaleY / (scaleY + 0.1)) {
+        if (height() <= lastVisibleLine() * lineHeight() * scaleY / (scaleY + 0.1)) {
             calcSizes();
         } else {
             scaleY += 0.1;
@@ -2944,7 +2951,7 @@ void MatrixWidget::wheelEvent(QWheelEvent *event) {
 
             scrollXChanged(newStartTime);
             emit scrollChanged(startTimeX, maxTimeInFile - widgetRange, startLineY,
-                               NUM_LINES - (endLineY - startLineY));
+                               std::max(0, lastVisibleLine() - (endLineY - startLineY)));
         }
 
         if (verScrollAmount != 0) {
@@ -2966,7 +2973,7 @@ void MatrixWidget::wheelEvent(QWheelEvent *event) {
             // endline too large handled in scrollYchanged()
             scrollYChanged(newStartLineY);
             emit scrollChanged(startTimeX, maxTimeInFile - widgetRange, startLineY,
-                               NUM_LINES - (endLineY - startLineY));
+                               std::max(0, lastVisibleLine() - (endLineY - startLineY)));
         }
     }
 }

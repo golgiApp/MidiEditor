@@ -885,13 +885,13 @@ MainWindow::MainWindow(QString initFile)
     // arrangement playhead clock after each Play/Record instead.
     arrangementArea->setMinimumHeight(105);
     // The arrangement can be resized independently from the Piano Roll.
-    leftSplitter->setStretchFactor(0, 3);  // arrangement
-    leftSplitter->setStretchFactor(1, 8);  // piano roll
-    leftSplitter->setStretchFactor(2, 1);  // velocity editor
-    leftSplitter->setStretchFactor(3, 0);  // horizontal scrollbar
-    leftSplitter->setSizes({280, 530, 115, 20});
-
-    // Set the sizes of leftSplitter
+    // Give the arrangement and the complete Piano Roll area equal initial space.
+    // The splitter handles remain available for manual adjustments.
+    leftSplitter->setStretchFactor(0, 1);
+    leftSplitter->setStretchFactor(1, 1);
+    leftSplitter->setStretchFactor(2, 1);
+    leftSplitter->setStretchFactor(3, 0);
+    leftSplitter->setSizes({480, 380, 80, 20});
 
     // Track
     tracksWidget = new QWidget(upperTabWidget);
@@ -972,6 +972,29 @@ MainWindow::MainWindow(QString initFile)
                                  top + (ArrangementWidget::rulerHeight - trackHeaderActions->height()) / 2);
     };
     trackHeaderActions->setFixedSize(trackHeaderActions->sizeHint());
+    auto *rulerZoom = new QWidget(_arrangementWidget);
+    auto *rulerZoomLayout = new QHBoxLayout(rulerZoom);
+    rulerZoomLayout->setContentsMargins(0, 0, 0, 0);
+    rulerZoomLayout->setSpacing(4);
+    rulerZoom->setStyleSheet(trackHeaderActions->styleSheet());
+    for (bool zoomIn : {false, true}) {
+        auto *button = new QToolButton(rulerZoom);
+        button->setIcon(Appearance::adjustIconForDarkMode(zoomIn
+            ? QStringLiteral(":/run_environment/graphics/tool/zoom_hor_in.png")
+            : QStringLiteral(":/run_environment/graphics/tool/zoom_hor_out.png")));
+        button->setIconSize(QSize(16, 16));
+        button->setFixedSize(28, 24);
+        const QString label = zoomIn ? tr("Zoom in on Arrangement") : tr("Zoom out of Arrangement");
+        button->setToolTip(label);
+        button->setAccessibleName(label);
+        connect(button, &QToolButton::clicked, _arrangementWidget, [this, zoomIn]() {
+            _arrangementWidget->zoomTimeline(zoomIn);
+        });
+        rulerZoomLayout->addWidget(button);
+    }
+    rulerZoom->setFixedSize(rulerZoom->sizeHint());
+    _arrangementWidget->setRulerZoomControls(rulerZoom);
+
     auto *trackScrollBar = arrangementArea->verticalScrollBar();
     connect(trackScrollBar, &QScrollBar::valueChanged, _arrangementWidget, pinTrackHeader);
     pinTrackHeader(trackScrollBar->value());
@@ -1150,7 +1173,6 @@ MainWindow::MainWindow(QString initFile)
 
     QWidget *buttons = setupActions(central);
     if (auto *editingToolbar = _actionMap.value("show_toolbar")) {
-        editingToolbar->setText(tr("Show Editing Toolbar"));
         buttons->setVisible(editingToolbar->isChecked());
     }
 
@@ -1163,7 +1185,6 @@ MainWindow::MainWindow(QString initFile)
         "QWidget#xivControlBar QToolButton:hover:enabled { background:#585d64; }"
         "QWidget#xivControlBar QToolButton:pressed { background:#303338; }"
         "QWidget#xivControlBar QToolButton:checked { background:#285b87; border-color:#5185ae; }"
-        "QWidget#xivControlBar QToolButton#xivControlMore { padding-right:17px; }"
         "QWidget#xivControlBar QToolButton:disabled { color:#9da1a8; background:#3a3d42; }"
         "QWidget#xivControlBar QToolButton[xivTransport=\"true\"] {"
         " border-radius:2px; padding:0; }"
@@ -1204,6 +1225,9 @@ MainWindow::MainWindow(QString initFile)
         scrollBarArea->setVisible(visible);
         velocityArea->setVisible(visible && _settings->value("control_widget_visible", true).toBool());
     });
+    addControl(_actionMap.value("undo"), true);
+    addControl(_actionMap.value("redo"), true);
+    bar->addSpacing(6);
     addControl(inspectorAction);
     addControl(pianoRollAction);
     if (auto *toolbarAction = _actionMap.value("show_toolbar")) {
@@ -1295,17 +1319,6 @@ MainWindow::MainWindow(QString initFile)
     auto *fixChannelsButton = addControl(_fixXIVChannelsTracksAction);
     fixChannelsButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     bar->addStretch(1);
-    auto *more = new QToolButton(controlBar);
-    more->setObjectName(QStringLiteral("xivControlMore"));
-    more->setText(tr("More"));
-    more->setFixedHeight(30);
-    more->setPopupMode(QToolButton::InstantPopup);
-    auto *moreMenu = new QMenu(more);
-    moreMenu->addAction(_actionMap.value("show_toolbar"));
-    moreMenu->addAction(_actionMap.value("snap_options"));
-    more->setMenu(moreMenu);
-    bar->addWidget(more);
-
     // MIDI stores the meter denominator as a power of two (2 means /4).
     const auto meterAt = [](MidiFile *document, int tick, int &numerator) {
         int exponent = 2;
@@ -5938,7 +5951,6 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
 
     QMenu *magnetOptionsMenu = new QMenu(tr("Magnet Options..."), toolsMB);
     toolsMB->addMenu(magnetOptionsMenu);
-    _actionMap["snap_options"] = magnetOptionsMenu->menuAction();
     
     _snapGridAction = new QAction(tr("Snap to Grid"), this);
     _snapGridAction->setCheckable(true);
@@ -6267,12 +6279,21 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
 
     viewMB->addSeparator();
 
-    _toolbarAction = new QAction(tr("Show Toolbar"), this);
+    _toolbarAction = new QAction(tr("Show Editing Toolbar"), this);
     _toolbarAction->setCheckable(true);
     _toolbarAction->setChecked(Appearance::toolbarVisible());
     connect(_toolbarAction, SIGNAL(toggled(bool)), this, SLOT(toggleToolbar(bool)));
     viewMB->addAction(_toolbarAction);
     _actionMap["show_toolbar"] = _toolbarAction;
+
+    auto *eventLanesAction = viewMB->addAction(tr("Show MIDI Event Lanes"));
+    eventLanesAction->setCheckable(true);
+    eventLanesAction->setChecked(_settings->value("xiv/show_midi_event_lanes", false).toBool());
+    connect(eventLanesAction, &QAction::toggled, this, [this](bool show) {
+        _settings->setValue("xiv/show_midi_event_lanes", show);
+        mw_matrixWidget->setMidiEventLanesVisible(show);
+        _matrixWidgetContainer->update();
+    });
 
     _controlWidgetAction = new QAction(tr("Show Control Widget"), this);
     _controlWidgetAction->setCheckable(true);
