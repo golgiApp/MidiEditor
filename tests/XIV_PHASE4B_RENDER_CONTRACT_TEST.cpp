@@ -44,7 +44,7 @@ int main() {
     // The source interval stays at 384..768 while playback shifts to 768..1152.
     assert(model.find(second)->sourceStartTick == 384);
     assert(model.find(second)->startTick == 768);
-    assert(!model.canMove(second, 200)); // would collide with the first region
+    assert(model.canMove(second, 200)); // may overlap the first region
     const int duplicate = model.duplicate(second, 1152);
     assert(duplicate > 0);
     auto duplicated = xiv::renderRegionNotes(notes, model);

@@ -800,6 +800,14 @@ MainWindow::MainWindow(QString initFile)
         quantizeTrackRegions->setEnabled(hasTrack && region && editable);
     };
     _arrangementWidget->inspectorChanged = refreshInspector;
+    _arrangementWidget->regionQuantizeRequested = [inspectorAction, grid, refreshInspector]() {
+        inspectorAction->setChecked(true);
+        refreshInspector();
+        grid->setFocus(Qt::OtherFocusReason);
+    };
+    _arrangementWidget->chordVoiceTolerance = [this]() {
+        return _settings->value("ffxiv/chord_voice_tolerance_ticks", 0).toInt();
+    };
     refreshInspector();
     const auto applyInspectorQuantize = [this, grid, strength, swing, refreshInspector]() {
         _arrangementWidget->applyQuantize(

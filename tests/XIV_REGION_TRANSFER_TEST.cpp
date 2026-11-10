@@ -22,7 +22,12 @@ int main() {
     assert(notes[2].regionId == left && notes[2].channel == 2 && notes[2].velocity == 90);
 
     model = initial;
-    assert(!xiv::consolidateRegions(model, {left}, left, 1, 0, 3, 3, source));
+    auto overlay = model;
+    assert(xiv::consolidateRegions(overlay, {left}, left, 1, 0, 3, 3, source));
+    assert(overlay.at(1, 15)->id == left && overlay.find(upper));
+    assert(xiv::renderRegionNotes(source, overlay).size() == 3);
+    assert(xiv::consolidateRegions(overlay, {left, upper}, left, 1, 0, 3, 3, source));
+    assert(!overlay.find(upper) && xiv::renderRegionNotes(source, overlay).size() == 3);
     assert(!xiv::consolidateRegions(model, {left}, left, 2, 0, -1, 3, source));
     assert(model.regions().size() == 3);
     assert(xiv::consolidateRegions(model, {left, upper}, upper, 1, 0, 3, 3, source));
@@ -41,5 +46,21 @@ int main() {
     assert(notes[3].trackIndex == 2 && notes[3].startTick == 420);
     assert(model.find(left)->endTick() == 480);
     assert(model.isManagedTrack(0) && model.isManagedTrack(2));
-    std::cout << "Horizontal and vertical joins, routing, overlap checks, and loop transfer passed\n";
+    // Split in the middle of a partial repeat. Notes after the cut retain
+    // their absolute positions, with a retrigger only at the split point.
+    xiv::MidiRegionModel loop;
+    const int phrase = loop.addInitial(0, 0, 100);
+    assert(loop.loopTo(phrase, 240));
+    const std::vector<xiv::SourceRegionNote> phraseNotes{
+        {1, 0, 10, 35, 60, 90, 2}, {2, 0, 30, 45, 62, 80, 2}
+    };
+    assert(xiv::consolidateRegions(loop, {phrase}, phrase, 0, 0, -1, 1, phraseNotes));
+    const int tail = loop.split(phrase, 225, xiv::CrossingNoteMode::Split);
+    assert(tail && loop.find(tail)->startTick == 225 && loop.find(tail)->endTick() == 240);
+    notes = xiv::renderRegionNotes(phraseNotes, loop);
+    assert(notes.size() == 7);
+    assert(notes[4].startTick == 210 && notes[4].endTick == 225);
+    assert(notes[5].startTick == 225 && notes[5].endTick == 235);
+    assert(notes[6].startTick == 230 && notes[6].endTick == 240);
+    std::cout << "Horizontal and vertical joins, routing, overlays, and loop transfer passed\n";
 }

@@ -201,8 +201,8 @@ public:
         return nullptr;
     }
     const MidiRegion *at(int trackIndex, int tick) const {
-        for (const auto &r : _regions)
-            if (r.trackIndex == trackIndex && r.contains(tick)) return &r;
+        for (auto it = _regions.crbegin(); it != _regions.crend(); ++it)
+            if (it->trackIndex == trackIndex && it->contains(tick)) return &*it;
         return nullptr;
     }
     // Splitting changes region boundaries only; no MIDI event is destroyed.
@@ -226,32 +226,21 @@ public:
         }
         return 0;
     }
-    // Non-destructive arrangement movement. Only the destination timeline
-    // changes: sourceStartTick/sourceEndTick retain the original musical data.
-    // Reject overlapping regions and integer overflow before mutating state.
-    // Cross-track movement is intentionally deferred until instrument/channel
-    // routing and MIDI export can honor it correctly.
+    // The list order is the paint order. A move places its region on top
+    // without changing the notes or other regions underneath.
     bool canMove(int id, int newStartTick) const {
-        const MidiRegion *target = find(id);
-        if (!target || newStartTick < 0 ||
-            static_cast<int64_t>(newStartTick) + target->displayDuration() >
-                std::numeric_limits<int>::max()) return false;
-        const int64_t newEndTick = static_cast<int64_t>(newStartTick) + target->displayDuration();
-        for (const auto &r : _regions) {
-            if (r.id == id || r.trackIndex != target->trackIndex) continue;
-            if (newStartTick < r.endTick() && r.startTick < newEndTick) return false;
-        }
-        return true;
+        const auto *region = find(id);
+        return region && newStartTick >= 0 &&
+               static_cast<int64_t>(newStartTick) + region->displayDuration() <=
+                   std::numeric_limits<int>::max();
     }
     bool move(int id, int newStartTick) {
         if (!canMove(id, newStartTick)) return false;
-        for (auto &r : _regions) {
-            if (r.id == id) {
-                r.startTick = newStartTick;
-                return true;
-            }
-        }
-        return false;
+        const auto it = std::find_if(_regions.begin(), _regions.end(),
+            [id](const auto &region) { return region.id == id; });
+        it->startTick = newStartTick;
+        std::rotate(it, it + 1, _regions.end());
+        return true;
     }
     // An independent copy uses the same source interval but its own region ID.
     bool canDuplicate(int id, int newStartTick) const {
@@ -379,17 +368,7 @@ public:
         }
         std::sort(ids.begin(), ids.end());
         if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) return false;
-        // In this first implementation regions on one track may touch, but
-        // they may not overlap. Future region overlays need explicit layers.
-        auto sorted = incoming;
-        std::sort(sorted.begin(), sorted.end(), [](const MidiRegion &a, const MidiRegion &b) {
-            if (a.trackIndex != b.trackIndex) return a.trackIndex < b.trackIndex;
-            return a.startTick < b.startTick;
-        });
-        for (std::size_t i = 1; i < sorted.size(); ++i) {
-            if (sorted[i - 1].trackIndex == sorted[i].trackIndex &&
-                sorted[i - 1].endTick() > sorted[i].startTick) return false;
-        }
+        // Preserve paint order and allow independent regions to overlap.
         _regions = incoming;
         for (const auto &r : incoming) _managedTracks.insert(r.trackIndex);
         _nextId = highestId + 1;

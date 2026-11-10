@@ -1726,8 +1726,10 @@ bool MidiFile::save(QString path) {
         data.append((qint8) ((trackL & (0xFF << 8 * i)) >> 8 * i));
     }
 
+    // A format-0 source becomes format 1 when the arrangement adds tracks.
+    const int outputFormat = numTracks() > 1 ? 1 : _midiFormat;
     for (int i = 1; i >= 0; i--) {
-        data.append((qint8) ((_midiFormat & (0xFF << 8 * i)) >> 8 * i));
+        data.append((qint8) ((outputFormat & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
@@ -1834,18 +1836,28 @@ bool MidiFile::saveArrangedMidi(QString path) {
     QByteArray data;
     data.append("MThd", 4);
     data.append(char(0)); data.append(char(0)); data.append(char(0)); data.append(char(6));
-    data.append(char((_midiFormat >> 8) & 255)); data.append(char(_midiFormat & 255));
     const int trackCount = numTracks();
+    const int outputFormat = trackCount > 1 ? 1 : _midiFormat;
+    data.append(char((outputFormat >> 8) & 255)); data.append(char(outputFormat & 255));
     data.append(char((trackCount >> 8) & 255)); data.append(char(trackCount & 255));
     data.append(char((timePerQuarter >> 8) & 255)); data.append(char(timePerQuarter & 255));
     const int finalEnd = std::max(endTick(), arrangementEndTick());
     for (int t = 0; t < trackCount; ++t) {
         QByteArray trackBytes;
+        MidiTrack *track = _tracks->at(t);
+        if (auto *name = track->nameEvent()) {
+            // A track name belongs to its own MTrk chunk, even though the
+            // editor stores text events in the shared meta-event channel.
+            trackBytes.append(writeDeltaTime(0));
+            trackBytes.append(name->save());
+        }
         int last = 0;
         for (auto it = allEvents.cbegin(); it != allEvents.cend(); ++it) {
             MidiEvent *event = it.value();
+            if (auto *text = dynamic_cast<TextEvent *>(event);
+                text && text->type() == TextEvent::TRACKNAME) continue;
             const bool meta = event->channel() >= 16;
-            if ((meta && t != 0) || (!meta && _tracks->at(t) != event->track()))
+            if ((meta && t != 0) || (!meta && track != event->track()))
                 continue;
             const int tick = it.key();
             if (tick < last) continue;
@@ -2026,8 +2038,10 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
         data.append((qint8) ((trackL & (0xFF << 8 * i)) >> 8 * i));
     }
 
+    // A format-0 source becomes format 1 when the arrangement adds tracks.
+    const int outputFormat = numTracks() > 1 ? 1 : _midiFormat;
     for (int i = 1; i >= 0; i--) {
-        data.append((qint8) ((_midiFormat & (0xFF << 8 * i)) >> 8 * i));
+        data.append((qint8) ((outputFormat & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {

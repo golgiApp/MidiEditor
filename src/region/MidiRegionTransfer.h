@@ -5,14 +5,9 @@
 
 namespace xiv {
 
-inline bool regionSpanIsFree(const MidiRegionModel &model, const std::set<int> &excluded,
-                             int track, int start, int64_t end, int trackCount) {
-    if (track < 0 || track >= trackCount || start < 0 || end <= start ||
-        end > std::numeric_limits<int>::max()) return false;
-    return std::none_of(model.regions().begin(), model.regions().end(), [&](const auto &region) {
-        return region.trackIndex == track && !excluded.count(region.id) &&
-               start < region.endTick() && region.startTick < end;
-    });
+inline bool validRegionDestination(int track, int start, int64_t end, int trackCount) {
+    return track >= 0 && track < trackCount && start >= 0 && end > start &&
+           end <= std::numeric_limits<int>::max();
 }
 
 // Capture the audible note positions before removing anything. The resulting
@@ -35,7 +30,7 @@ inline bool consolidateRegions(MidiRegionModel &model, const std::set<int> &ids,
     }
     if (changesTrack && (destinationChannel < 0 || destinationChannel > 15)) return false;
     const int64_t end = static_cast<int64_t>(destinationStart) + (last - first);
-    if (!regionSpanIsFree(model, ids, destinationTrack, destinationStart, end, trackCount))
+    if (!validRegionDestination(destinationTrack, destinationStart, end, trackCount))
         return false;
 
     std::vector<OwnedRegionNote> notes;

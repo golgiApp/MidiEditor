@@ -24,10 +24,16 @@ int main() {
     assert(initial[0].sourceId == 1 && initial[0].startTick == 100 && initial[0].endTick == 700);
     assert(initial[1].sourceId == 3 && initial[1].startTick == 200 && initial[1].endTick == 400);
     assert(initial[2].sourceId == 2 && initial[2].startTick == 500 && initial[2].endTick == 600);
-    assert(!m.canMove(a, 490));  // overlap right half
+    assert(m.canMove(a, 490));
     assert(!m.move(a, -1));
     assert(!m.move(a, INT_MAX));
-    assert(!m.move(a, 720));    // would overlap right half
+    auto overlap = m;
+    assert(overlap.move(a, 720));
+    assert(overlap.at(0, 800)->id == a);
+    auto reopened = MidiRegionModel{};
+    assert(reopened.replaceValidated(overlap.regions(), 2));
+    assert(reopened.at(0, 800)->id == a && reopened.regions().size() == 2);
+    assert(renderRegionNotes(notes, reopened).size() == 3);
     assert(m.move(b, 960));     // leaves silence after left half
     assert(m.find(b)->startTick == 960 && m.find(b)->sourceStartTick == 480);
     auto moved = renderRegionNotes(notes, m);
@@ -48,7 +54,7 @@ int main() {
     assert(duplicated.size() == 4); // adds only the first fragment of source note 1
     assert(duplicated.back().sourceId == 1 && duplicated.back().startTick == 1060 && duplicated.back().endTick == 1660);
     assert(m.replaceValidated(m.regions(), 2));
-    assert(!m.move(a, 970));
+    assert(m.canMove(a, 970));
     assert(m.move(c, 1440));
     assert(m.find(c)->startTick == 1440);
     assert(m.find(c)->endTick() == 1920);
