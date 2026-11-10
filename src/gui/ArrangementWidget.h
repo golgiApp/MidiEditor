@@ -10,6 +10,7 @@
 
 #include <QWidget>
 #include <QPainter>
+#include <QPainterPath>
 #include <QMouseEvent>
 #include <QContextMenuEvent>
 #include <QPoint>
@@ -133,6 +134,20 @@ public:
     }
     static constexpr int headerWidth = 326;
     static constexpr int rulerHeight = 34;
+    void replaceRegionNotes(int id, std::vector<xiv::OwnedRegionNote> notes,
+                            const QString &description) {
+        const auto *region = _regions.find(id);
+        if (!_file || MidiPlayer::isPlaying() || MidiInput::recording() ||
+            id != _selectedRegionId || !region || region->loopLengthTicks ||
+            region->quantize.active()) return;
+        ProtocolEntry *before = _regionHistory.copy();
+        if (!_regions.replaceOwnedNotes(id, std::move(notes))) {
+            delete before;
+            return;
+        }
+        finishRegionEdit(before, description);
+    }
+
     void setRulerTop(int top) {
         if (top == _rulerTop) return;
         _rulerTop = top;
@@ -453,11 +468,20 @@ protected:
                 QColor regionFill = accent;
                 regionFill.setAlpha(selectedRegion ? 83 : (chosen ? 66 : 44));
                 const QRect regionRect(x0, y + 6, x1 - x0, laneHeight - 12);
-                p.fillRect(regionRect, regionFill);
-                p.setBrush(Qt::NoBrush);
+                p.setBrush(regionFill);
                 p.setPen(QPen(selectedRegion ? QColor("#FFD18B") : accent,
                               selectedRegion ? 2 : 1));
-                p.drawRect(regionRect.adjusted(0, 0, -1, -1));
+                const QRect outline = regionRect.adjusted(0, 0, -1, -1);
+                if (region.loopLengthTicks > region.duration()) {
+                    p.save();
+                    p.setRenderHint(QPainter::Antialiasing);
+                    p.drawPath(loopOutline(outline, region.startTick, region.endTick(), region.duration()));
+                    p.restore();
+                } else {
+                    p.fillRect(regionRect, regionFill);
+                    p.setBrush(Qt::NoBrush);
+                    p.drawRect(outline);
+                }
                 // A small title identifies each selectable region.
                 p.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
                 p.setPen(selectedRegion ? QColor("#FFE0AC") : QColor("#AFBBCB"));
@@ -580,8 +604,19 @@ protected:
                                   valid ? 109 : 65, 62));
                 p.setPen(QPen(QColor(valid ? "#70E4A0" : "#ED6977"),
                               2, Qt::DashLine));
-                p.drawRect(QRect(left, top + 7, std::max(1, right - left),
-                                 laneHeight - 14));
+                if (valid && _dragMode == RegionDragMode::Loop) {
+                    const int visibleLeft = std::max(left, headerWidth);
+                    const int visibleRight = std::min(right, width() - 1);
+                    if (visibleLeft < visibleRight) {
+                        p.setRenderHint(QPainter::Antialiasing);
+                        p.drawPath(loopOutline(QRect(QPoint(visibleLeft, top + 7),
+                                                    QPoint(visibleRight, top + laneHeight - 7)),
+                                               previewStart, previewEnd, moving->duration()));
+                    }
+                } else {
+                    p.drawRect(QRect(left, top + 7, std::max(1, right - left),
+                                     laneHeight - 14));
+                }
                 p.setPen(QColor("#FFFFFF"));
                 p.drawText(QRect(left+5, top+16, std::max(40, right-left-8), 20),
                            Qt::AlignLeft | Qt::AlignVCenter,
@@ -656,17 +691,12 @@ protected:
                 splitAtCursor->setEnabled(region->loopLengthTicks == 0 &&
                     cursorTick > region->startTick &&
                     cursorTick < region->endTick());
-                QAction *duplicateAction = menu.addAction(tr("Duplicate Region After Original"));
-                const int nextTick = region->endTick();
-                duplicateAction->setEnabled(!MidiPlayer::isPlaying() &&
-                                            _regions.canDuplicate(id, nextTick));
                 menu.addSeparator();
                 QAction *deleteRegionAction = menu.addAction(tr("Delete Region (Backspace)"));
                 deleteRegionAction->setEnabled(!MidiPlayer::isPlaying());
                 QAction *chosen = menu.exec(e->globalPos());
                 if (chosen == splitHere) splitRegion(id, tick);
                 else if (chosen == splitAtCursor) splitRegion(id, cursorTick);
-                else if (chosen == duplicateAction) duplicateRegion(id, nextTick);
                 else if (chosen == deleteRegionAction) deleteSelectedRegion();
                 update();
                 e->accept();
@@ -1371,6 +1401,41 @@ private:
         }
         return nullptr;
     }
+    QPainterPath loopOutline(const QRect &bounds, int startTick, int endTick, int period) const {
+        constexpr int halfWidth = 5;
+        constexpr int depth = 4;
+        QVector<int> seams;
+        // Start near the viewport, retaining one earlier boundary to absorb
+        // rounding when converting between ticks and whole milliseconds.
+        const int64_t offset = static_cast<int64_t>(_file->tick(_originMs)) - startTick;
+        const int64_t firstRepeat = std::max<int64_t>(1, offset / period - 1);
+        int previous = bounds.left();
+        for (int64_t tick = startTick + firstRepeat * period; tick < endTick; tick += period) {
+            const int x = xForMs(_file->msOfTick(static_cast<int>(tick)));
+            if (x >= bounds.right() - halfWidth) break;
+            if (x - previous <= 2 * halfWidth) continue;
+            seams.append(x);
+            previous = x;
+        }
+
+        QPainterPath path;
+        path.moveTo(bounds.topLeft());
+        const auto notch = [&path](int x, int y, int direction, int inward) {
+            path.lineTo(x - direction * halfWidth, y);
+            path.quadTo(x - direction * 2, y, x, y + inward * depth);
+            path.quadTo(x + direction * 2, y, x + direction * halfWidth, y);
+        };
+        for (int x : seams)
+            notch(x, bounds.top(), 1, 1);
+        path.lineTo(bounds.topRight());
+        path.lineTo(bounds.bottomRight());
+        for (auto it = seams.crbegin(); it != seams.crend(); ++it)
+            notch(*it, bounds.bottom(), -1, -1);
+        path.lineTo(bounds.bottomLeft());
+        path.closeSubpath();
+        return path;
+    }
+
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     // Hit targets match the painted buttons. Do not overlap the track name.
     QRect instrumentRect(int y) const { return QRect(13, y + 49, 299, 27); }

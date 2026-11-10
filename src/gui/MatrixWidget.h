@@ -31,6 +31,7 @@
 #include <QObject>
 #include <QString>
 #include <set>
+#include <functional>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QWidget>
@@ -116,6 +117,7 @@ public:
     MidiTrack *focusedTrack() const { return _focusedTrack; }
     // Read-only rendered note projection from the selected MIDI region.
     // Do not use source-event hit testing on moved/looped note positions.
+    std::function<void(int, std::vector<xiv::OwnedRegionNote>, const QString &)> commitRegionNotes;
     void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
                        bool showAllRegions, bool navigate = false);
     void refreshRegionViewNotes();
@@ -733,6 +735,24 @@ private:
     bool _regionViewEnabled = false;
     bool _regionShowAll = false;
     bool _regionEditingSafe = false;
+    enum class RegionGesture { None, Select, Move, ResizeLeft, ResizeRight, Add };
+    RegionGesture _regionGesture = RegionGesture::None;
+    QPoint _regionPressPoint;
+    std::set<int> _regionSelection;
+    std::set<int> _regionBoxBase;
+    QRect _regionSelectionBox;
+    int _regionAnchorId = 0;
+    Qt::MouseButton _regionGestureButton = Qt::NoButton;
+    Qt::KeyboardModifiers _regionGestureModifiers = Qt::NoModifier;
+
+    const xiv::MidiRegion *editableRegion() const;
+    QRect regionNoteRect(const xiv::RenderedRegionNote &note);
+    int regionEditTick(int x);
+    std::vector<xiv::OwnedRegionNote> regionNotesForEdit(const xiv::MidiRegion &region) const;
+    bool beginRegionGesture(QMouseEvent *event);
+    void updateRegionGesture(const QPoint &point);
+    void endRegionGesture(QMouseEvent *event);
+    bool deleteRegionSelection();
     bool _showGMDrumLabels = false;
     bool _pitchRangeDragging = false;
     int _pitchRangeAnchor = -1;

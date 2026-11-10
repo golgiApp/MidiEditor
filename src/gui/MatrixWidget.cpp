@@ -43,6 +43,7 @@
 #include "../tool/EditorTool.h"
 #include "../tool/Selection.h"
 #include "../tool/StandardTool.h"
+#include "../tool/NewNoteTool.h"
 #include "Appearance.h"
 #include "../tool/SelectTool.h"
 #include "../tool/MeasureTool.h"
@@ -50,6 +51,7 @@
 #include "MainWindow.h"
 #include "../support/GMDrumMap.h"
 #include <algorithm>
+#include <limits>
 #include <set>
 #include "../gui/Appearance.h"
 #include "../gui/ChannelVisibilityManager.h"
@@ -888,7 +890,9 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                                    std::max(0, height() - timeHeight)));
         painter->setPen(Qt::NoPen);
         for (const auto &n : _regionViewNotes) {
-            if (_regionEditingSafe) continue;  // native editable notes are visible
+            const int id = n.ownedNoteId ? n.ownedNoteId : n.sourceId;
+            const bool selected = !_regionShowAll && _regionSelection.count(id);
+            if (_regionEditingSafe && !selected) continue;
             const int line = 127 - n.pitch;
             if (line < startLineY || line > endLineY) continue;
             const int begin = xPosOfMs(file->msOfTick(n.startTick));
@@ -905,10 +909,15 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                 if (track && track->color()) accent = *track->color();
             }
             painter->fillRect(QRect(x, y + 1, ex - x, h), accent);
-            painter->setPen(QColor("#C8D6E2"));
+            painter->setPen(selected ? QColor("#FFE0A4") : QColor("#C8D6E2"));
             painter->drawRect(QRect(x, y + 1, std::max(0, ex - x - 1),
                                     std::max(0, h - 1)));
             painter->setPen(Qt::NoPen);
+        }
+        if (_regionGesture == RegionGesture::Select && !_regionSelectionBox.isEmpty()) {
+            painter->fillRect(_regionSelectionBox, QColor(120, 177, 230, 40));
+            painter->setPen(QColor("#A4CAEB"));
+            painter->drawRect(_regionSelectionBox);
         }
         if (!_regionShowAll && _selectedViewRegionId == 0) {
             painter->setPen(QColor("#BFC7D3"));
@@ -1400,6 +1409,8 @@ void MatrixWidget::setFile(MidiFile *f) {
     stopAllEmulationNotes();
     file = f;
     _regionViewNotes.clear();
+    _regionSelection.clear();
+    _regionGesture = RegionGesture::None;
     _regionViewEnabled = false;
     _regionEditingSafe = false;
     _selectedViewRegionId = 0;
@@ -1414,7 +1425,12 @@ void MatrixWidget::setFile(MidiFile *f) {
     connect(file->protocol(), SIGNAL(actionFinished()), this, SLOT(registerRelayout()));
     connect(file->protocol(), SIGNAL(actionFinished()), this, SLOT(update()));
     connect(file->protocol(), &Protocol::actionFinished, this, [this]() {
-        if (_regionViewEnabled) { refreshRegionViewNotes(); update(); }
+        if (_regionViewEnabled) {
+            _regionSelection.clear();
+            _regionGesture = RegionGesture::None;
+            refreshRegionViewNotes();
+            update();
+        }
     });
 
     calcSizes();
@@ -1479,14 +1495,15 @@ MidiFile *MatrixWidget::midiFile() {
     return file;
 }
 
-// Arrange-view projection: only the selected region is visible by default.
-// The underlying MIDI events are intentionally left unmodified. Until note
-// editing is made region-local, these display notes are read-only.
+// Display the selected region by default. Region note gestures use the
+// rendered positions and commit a region-local snapshot.
 void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
                                  int selectedRegionId, bool showAllRegions,
                                  bool navigate) {
     const bool changedSelection = _selectedViewRegionId != selectedRegionId ||
                                   _regionShowAll != showAllRegions;
+    if (changedSelection) _regionSelection.clear();
+    _regionGesture = RegionGesture::None;
     _regionViewModel = model;
     _selectedViewRegionId = selectedRegionId;
     _regionShowAll = showAllRegions;
@@ -1550,6 +1567,199 @@ void MatrixWidget::refreshRegionViewNotes() {
     }
 }
 
+const xiv::MidiRegion *MatrixWidget::editableRegion() const {
+    if (!file || !enabled || !_regionViewEnabled || _regionShowAll ||
+        !commitRegionNotes || MidiPlayer::isPlaying() || MidiInput::recording()) return nullptr;
+    const auto *region = _regionViewModel.find(_selectedViewRegionId);
+    return region && !region->loopLengthTicks && !region->quantize.active() ? region : nullptr;
+}
+
+QRect MatrixWidget::regionNoteRect(const xiv::RenderedRegionNote &note) {
+    const int x = xPosOfMs(file->msOfTick(note.startTick));
+    const int end = xPosOfMs(file->msOfTick(note.endTick));
+    return QRect(x, yPosOfLine(127 - note.pitch), std::max(1, end - x),
+                 std::max(1, static_cast<int>(lineHeight())));
+}
+
+int MatrixWidget::regionEditTick(int x) {
+    x = std::clamp(x, lineNameWidth, std::max(lineNameWidth, width()));
+    if (auto *tool = dynamic_cast<EventTool *>(Tool::currentTool())) {
+        int tick = -1;
+        tool->rasteredX(x, &tick);
+        if (tick >= 0) return tick;
+    }
+    return std::max(0, file->tick(msOfXPos(x)));
+}
+
+std::vector<xiv::OwnedRegionNote> MatrixWidget::regionNotesForEdit(const xiv::MidiRegion &region) const {
+    if (region.ownedNotes) return *region.ownedNotes;
+    std::vector<xiv::OwnedRegionNote> notes;
+    notes.reserve(_regionViewNotes.size());
+    for (const auto &note : _regionViewNotes) {
+        notes.push_back({note.sourceId, note.sourceSliceStartTick, note.sourceSliceEndTick,
+                         note.pitch, note.velocity, note.channel});
+    }
+    return notes;
+}
+
+bool MatrixWidget::beginRegionGesture(QMouseEvent *event) {
+    const QPoint point = event->position().toPoint();
+    if (!_regionViewEnabled || point.x() < lineNameWidth || point.y() < timeHeight ||
+        lineAtY(point.y()) < 0 || lineAtY(point.y()) > 127) return false;
+    if (!editableRegion()) {
+        if (_selectedViewRegionId && !_regionShowAll && !MidiPlayer::isPlaying() && !MidiInput::recording())
+            QToolTip::showText(event->globalPosition().toPoint(),
+                tr("Turn off region quantization or remove the loop extension to edit these notes."), this);
+        return true;
+    }
+    const auto *tool = Tool::currentTool();
+    if (!dynamic_cast<const StandardTool *>(tool) && !dynamic_cast<const NewNoteTool *>(tool) &&
+        !dynamic_cast<const SelectTool *>(tool)) return true;
+    if (event->button() != Qt::LeftButton && event->button() != Qt::RightButton) return true;
+    if (event->button() == Qt::RightButton && event->modifiers().testFlag(Qt::ControlModifier)) return true;
+
+    EventTool::clearSelection();
+    _regionPressPoint = point;
+    _regionGestureButton = event->button();
+    _regionGestureModifiers = event->modifiers();
+    const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
+    if (event->button() == Qt::RightButton || dynamic_cast<const NewNoteTool *>(tool)) {
+        _regionGesture = RegionGesture::Add;
+        return true;
+    }
+    if (!dynamic_cast<const SelectTool *>(tool)) {
+        for (auto it = _regionViewNotes.crbegin(); it != _regionViewNotes.crend(); ++it) {
+            const QRect bounds = regionNoteRect(*it);
+            if (!bounds.contains(point)) continue;
+            const int id = it->ownedNoteId ? it->ownedNoteId : it->sourceId;
+            if (additive && _regionSelection.erase(id)) {
+                update();
+                return true;
+            }
+            if (!additive && !_regionSelection.count(id)) _regionSelection.clear();
+            _regionSelection.insert(id);
+            _regionAnchorId = id;
+            _regionGesture = RegionGesture::Move;
+            if (event->modifiers() == Qt::NoModifier && bounds.width() >= 8) {
+                if (point.x() - bounds.left() <= 2) _regionGesture = RegionGesture::ResizeLeft;
+                else if (bounds.right() - point.x() <= 2) _regionGesture = RegionGesture::ResizeRight;
+            }
+            update();
+            return true;
+        }
+    }
+    if (!additive) _regionSelection.clear();
+    _regionBoxBase = _regionSelection;
+    _regionSelectionBox = QRect();
+    _regionGesture = RegionGesture::Select;
+    update();
+    return true;
+}
+
+void MatrixWidget::updateRegionGesture(const QPoint &point) {
+    if (_regionGesture != RegionGesture::Select || !editableRegion()) return;
+    _regionSelectionBox = QRect(_regionPressPoint, point).normalized();
+    _regionSelection = _regionBoxBase;
+    for (const auto &note : _regionViewNotes) {
+        if (_regionSelectionBox.intersects(regionNoteRect(note)))
+            _regionSelection.insert(note.ownedNoteId ? note.ownedNoteId : note.sourceId);
+    }
+    update();
+}
+
+void MatrixWidget::endRegionGesture(QMouseEvent *event) {
+    const QPoint point = event->position().toPoint();
+    updateRegionGesture(point);
+    const auto gesture = _regionGesture;
+    _regionGesture = RegionGesture::None;
+    _regionSelectionBox = QRect();
+    update();
+    const auto *region = editableRegion();
+    if (!region || gesture == RegionGesture::None || gesture == RegionGesture::Select) return;
+    const int offset = region->sourceStartTick - region->startTick;
+    auto notes = regionNotesForEdit(*region);
+    if (gesture == RegionGesture::Add) {
+        const int start = regionEditTick(_regionPressPoint.x());
+        if (!region->contains(start)) return;
+        const int end = std::clamp(regionEditTick(point.x()), start + 1, region->endTick());
+        const auto *newNoteTool = dynamic_cast<const NewNoteTool *>(Tool::currentTool());
+        const int divisor = newNoteTool ? newNoteTool->effectiveDurationDivisor() : 0;
+        const int duration = std::max(1, file->ticksPerQuarter() * 4 / (divisor > 0 ? divisor : 16));
+        const int defaultEnd = start + std::min(duration, region->endTick() - start);
+        const int pitch = 127 - lineAtY(_regionPressPoint.y());
+        const int channel = std::clamp(NewNoteTool::editChannel(), 0, 15);
+        int id = 0;
+        for (const auto &note : notes) id = std::max(id, note.id);
+        if (id == std::numeric_limits<int>::max()) return;
+        notes.push_back({id + 1, start + offset,
+                         (divisor > 0 || point.x() == _regionPressPoint.x() ? defaultEnd : end) + offset, pitch, 100, channel});
+        commitRegionNotes(region->id, std::move(notes), tr("Add Region Note"));
+        return;
+    }
+
+    if ((point - _regionPressPoint).manhattanLength() < QApplication::startDragDistance()) return;
+    const auto anchor = std::find_if(_regionViewNotes.begin(), _regionViewNotes.end(), [this](const auto &note) {
+        return (note.ownedNoteId ? note.ownedNoteId : note.sourceId) == _regionAnchorId;
+    });
+    if (anchor == _regionViewNotes.end()) return;
+    const int dx = point.x() - _regionPressPoint.x();
+    const int edge = gesture == RegionGesture::ResizeRight ? anchor->endTick : anchor->startTick;
+    int delta = dx == 0 ? 0 : regionEditTick(xPosOfMs(file->msOfTick(edge)) + dx) - edge;
+    int pitchDelta = gesture == RegionGesture::Move
+        ? lineAtY(_regionPressPoint.y()) - lineAtY(point.y()) : 0;
+    if (_regionGestureModifiers.testFlag(Qt::ShiftModifier)) pitchDelta = 0;
+    if (_regionGestureModifiers.testFlag(Qt::AltModifier)) delta = 0;
+
+    int minDelta = std::numeric_limits<int>::min();
+    int maxDelta = std::numeric_limits<int>::max();
+    int minPitch = -127, maxPitch = 127;
+    // Clamp as a group so the relative pitches and timing of a chord survive.
+    for (auto &note : notes) {
+        if (!_regionSelection.count(note.id)) continue;
+        const auto visible = std::find_if(_regionViewNotes.begin(), _regionViewNotes.end(), [&note](const auto &n) {
+            return (n.ownedNoteId ? n.ownedNoteId : n.sourceId) == note.id;
+        });
+        if (visible == _regionViewNotes.end()) continue;
+        note.startTick = visible->sourceSliceStartTick;
+        note.endTick = visible->sourceSliceEndTick;
+        const int length = note.endTick - note.startTick;
+        if (gesture != RegionGesture::ResizeRight)
+            minDelta = std::max(minDelta, region->sourceStartTick - note.startTick);
+        if (gesture == RegionGesture::ResizeLeft)
+            maxDelta = std::min(maxDelta, length - 1);
+        else
+            maxDelta = std::min(maxDelta, std::max(0, region->sourceEndTick - note.endTick));
+        if (gesture == RegionGesture::ResizeRight)
+            minDelta = std::max(minDelta, 1 - length);
+        minPitch = std::max(minPitch, -note.pitch);
+        maxPitch = std::min(maxPitch, 127 - note.pitch);
+    }
+    delta = std::clamp(delta, minDelta, maxDelta);
+    pitchDelta = std::clamp(pitchDelta, minPitch, maxPitch);
+    if (!delta && !pitchDelta) return;
+    for (auto &note : notes) {
+        if (!_regionSelection.count(note.id)) continue;
+        if (gesture != RegionGesture::ResizeRight) note.startTick += delta;
+        if (gesture != RegionGesture::ResizeLeft) note.endTick += delta;
+        note.pitch += pitchDelta;
+    }
+    commitRegionNotes(region->id, std::move(notes),
+        gesture == RegionGesture::Move ? tr("Move Region Notes") : tr("Resize Region Notes"));
+}
+
+bool MatrixWidget::deleteRegionSelection() {
+    const auto *region = editableRegion();
+    if (!region || _regionSelection.empty()) return false;
+    auto notes = regionNotesForEdit(*region);
+    const auto end = std::remove_if(notes.begin(), notes.end(), [this](const auto &note) {
+        return _regionSelection.count(note.id) != 0;
+    });
+    if (end == notes.end()) return false;
+    notes.erase(end, notes.end());
+    commitRegionNotes(region->id, std::move(notes), tr("Delete Region Notes"));
+    return true;
+}
+
 // XIV MIDI Studio: pitch-key selection always searches the whole focused track,
 // including notes in other regions and outside the displayed time window.
 void MatrixWidget::selectPitchRange(int low, int high) {
@@ -1557,6 +1767,13 @@ void MatrixWidget::selectPitchRange(int low, int high) {
     low = std::clamp(low, 0, 127);
     high = std::clamp(high, 0, 127);
     if (low > high) std::swap(low, high);
+    if (editableRegion()) {
+        _regionSelection = _regionBoxBase;
+        for (const auto &note : _regionViewNotes) {
+            if (note.pitch >= low && note.pitch <= high)
+                _regionSelection.insert(note.ownedNoteId ? note.ownedNoteId : note.sourceId);
+        }
+    }
     QList<MidiEvent *> selected = _pitchRangeAdditive ? _pitchRangeExisting : QList<MidiEvent *>();
     QSet<MidiEvent *> seen(selected.begin(), selected.end());
     for (int channel = 0; channel < 16; ++channel) {
@@ -1587,6 +1804,11 @@ void MatrixWidget::selectPitchRange(int low, int high) {
 }
 
 void MatrixWidget::mouseMoveEvent(QMouseEvent *event) {
+    if (_regionGesture != RegionGesture::None) {
+        updateRegionGesture(event->position().toPoint());
+        event->accept();
+        return;
+    }
     if (_pitchRangeDragging) {
         const int currentPitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
         selectPitchRange(_pitchRangeAnchor, currentPitch);
@@ -1824,14 +2046,8 @@ void MatrixWidget::leaveEvent(QEvent *event) {
 }
 
 void MatrixWidget::mousePressEvent(QMouseEvent *event) {
-    // Do not let source-based tools alter the wrong notes when a projected
-    // region has been moved, trimmed or looped. Region-local editing requires
-    // a dedicated source-ID mapping and is not enabled in this preview.
-    if (_regionViewEnabled && !_regionEditingSafe &&
-        event->position().x() >= lineNameWidth &&
-        event->position().y() >= timeHeight) {
-        QToolTip::showText(event->globalPosition().toPoint(),
-            tr("Region note preview: editing arranged note copies is still in development"), this);
+    if (beginRegionGesture(event)) {
+        setFocus(Qt::MouseFocusReason);
         event->accept();
         return;
     }
@@ -1845,6 +2061,7 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
         _pitchRangeAnchor = pitch;
         _pitchRangeAdditive = bool(event->modifiers() & Qt::ControlModifier);
         _pitchRangeExisting = Selection::instance()->selectedEvents();
+        _regionBoxBase = _pitchRangeAdditive ? _regionSelection : std::set<int>{};
         selectPitchRange(pitch, pitch);
         grabMouse();
         event->accept();
@@ -2036,6 +2253,11 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
 }
 
 void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
+    if (_regionGesture != RegionGesture::None && event->button() == _regionGestureButton) {
+        endRegionGesture(event);
+        event->accept();
+        return;
+    }
     if (_pitchRangeDragging && event->button() == Qt::LeftButton) {
         _pitchRangeDragging = false;
         const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
@@ -2111,6 +2333,15 @@ void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
 
 bool MatrixWidget::takeKeyPressEvent(QKeyEvent *event) {
     if (event->isAutoRepeat()) return false;
+
+    if (_regionViewEnabled && event->modifiers() == Qt::NoModifier &&
+        (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
+        (hasFocus() || (parentWidget() && parentWidget()->hasFocus()))) {
+        if (deleteRegionSelection()) {
+            event->accept();
+            return true;
+        }
+    }
 
     bool handled = false;
     if (Tool::currentTool()) {
@@ -2750,8 +2981,9 @@ void MatrixWidget::keyReleaseEvent(QKeyEvent *event) {
 
 void MatrixWidget::contextMenuEvent(QContextMenuEvent* event)
 {
-    if (_regionViewEnabled && !_regionEditingSafe) {
-        event->accept(); // do not offer source-note edits for projections
+    if (_regionViewEnabled && event->pos().x() >= lineNameWidth &&
+        event->pos().y() >= timeHeight && lineAtY(event->pos().y()) <= 127) {
+        event->accept(); // Region notes do not use source-event commands.
         return;
     }
     // Context menu requires Ctrl + Right Click

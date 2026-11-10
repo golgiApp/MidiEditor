@@ -853,6 +853,10 @@ MainWindow::MainWindow(QString initFile)
     _arrangementWidget->seekTimeRequested = [this, seekArrangementTick](int ms) {
         if (file) seekArrangementTick(file->tick(std::max(0, ms)));
     };
+    mw_matrixWidget->commitRegionNotes = [this](int id, std::vector<xiv::OwnedRegionNote> notes,
+                                                const QString &description) {
+        _arrangementWidget->replaceRegionNotes(id, std::move(notes), description);
+    };
     _arrangementWidget->regionViewChanged = [this, refreshInspector]() {
         refreshInspector();
         if (!_arrangementWidget || !mw_matrixWidget || !file ||
