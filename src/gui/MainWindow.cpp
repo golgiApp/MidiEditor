@@ -50,6 +50,7 @@
 #include <QStyle>
 #include <QSignalBlocker>
 #include "../MidiEvent/TempoChangeEvent.h"
+#include "../MidiEvent/KeySignatureEvent.h"
 #include <QFontMetrics>
 #include <QFont>
 #include <QApplication>
@@ -190,7 +191,7 @@ MainWindow::MainWindow(QString initFile)
     bool ticksOK;
     int ticksPerQuarter = _settings->value("ticks_per_quarter", 192).toInt(&ticksOK);
     MidiFile::defaultTimePerQuarter = ticksPerQuarter;
-    bool magnet = _settings->value("magnet", false).toBool();
+    bool magnet = _settings->value("magnet", true).toBool();
     EventTool::enableMagnet(magnet);
     int magnetMode = _settings->value("magnetMode", EventTool::SNAP_GRID).toInt();
     EventTool::setMagnetMode(magnetMode);
@@ -901,6 +902,21 @@ MainWindow::MainWindow(QString initFile)
     connect(newTrack, SIGNAL(triggered()), this,
             SLOT(addTrack()));
     tracksTB->addAction(newTrack);
+    auto *trackHeaderActions = new QWidget(_arrangementWidget);
+    auto *trackHeaderLayout = new QHBoxLayout(trackHeaderActions);
+    trackHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    trackHeaderLayout->setSpacing(4);
+    auto *addTrackButton = new QToolButton(trackHeaderActions);
+    addTrackButton->setDefaultAction(newTrack);
+    addTrackButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    addTrackButton->setIconSize(QSize(14, 14));
+    trackHeaderActions->setStyleSheet(QStringLiteral(
+        "QToolButton { color:#eef0f2; background:#454952; border:1px solid #5e6570;"
+        " border-radius:4px; padding:0 8px; }"
+        "QToolButton:hover:enabled { background:#555e6b; }"
+        "QToolButton:disabled { color:#9da1a8; }"));
+    addTrackButton->setFixedHeight(24);
+    trackHeaderLayout->addWidget(addTrackButton);
 
     tracksTB->addSeparator();
 
@@ -930,6 +946,32 @@ MainWindow::MainWindow(QString initFile)
             SLOT(allTracksInvisible()));
     tracksTB->addAction(_allTracksInvisible);
 
+    auto *trackActionsButton = new QToolButton(trackHeaderActions);
+    trackActionsButton->setText(tr("Track Actions"));
+    trackActionsButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    trackActionsButton->setToolTip(tr("Mute, unmute, show or hide all tracks"));
+    trackActionsButton->setPopupMode(QToolButton::InstantPopup);
+    trackActionsButton->setFixedHeight(24);
+    trackActionsButton->setStyleSheet(QStringLiteral("QToolButton { padding-right:17px; }"));
+    auto *trackActionsMenu = new QMenu(trackActionsButton);
+    trackActionsMenu->addAction(_allTracksAudible);
+    trackActionsMenu->addAction(_allTracksMute);
+    trackActionsMenu->addSeparator();
+    trackActionsMenu->addAction(_allTracksVisible);
+    trackActionsMenu->addAction(_allTracksInvisible);
+    trackActionsButton->setMenu(trackActionsMenu);
+    trackHeaderLayout->addWidget(trackActionsButton);
+
+    const auto pinTrackHeader = [this, trackHeaderActions](int top) {
+        _arrangementWidget->setRulerTop(top);
+        trackHeaderActions->move(ArrangementWidget::headerWidth - trackHeaderActions->width() - 9,
+                                 top + (ArrangementWidget::rulerHeight - trackHeaderActions->height()) / 2);
+    };
+    trackHeaderActions->setFixedSize(trackHeaderActions->sizeHint());
+    auto *trackScrollBar = arrangementArea->verticalScrollBar();
+    connect(trackScrollBar, &QScrollBar::valueChanged, _arrangementWidget, pinTrackHeader);
+    pinTrackHeader(trackScrollBar->value());
+
     // Spacer to push the FFXIV button to the right
     QWidget *tracksSpacer = new QWidget();
     tracksSpacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -947,7 +989,6 @@ MainWindow::MainWindow(QString initFile)
 
     _fixXIVChannelsTracksAction->setVisible(false);
 
-    // Global track actions appear in the compact bar's More menu.
     newTrack->setToolTip(tr("Add new MIDI track"));
     _allTracksAudible->setToolTip(tr("Unmute all tracks"));
     _allTracksMute->setToolTip(tr("Mute all tracks"));
@@ -1131,9 +1172,10 @@ MainWindow::MainWindow(QString initFile)
         " background:#2d6944; border-color:#518d65; }"
         "QWidget#xivControlBar QToolButton#xivRecord[recording=\"true\"] {"
         " background:#78373d; border-color:#aa555c; }"
-        "QWidget#xivControlBar QToolButton#xivPosition {"
-        " background:#161d26; border-color:#566273; padding:0; }"
-        "QWidget#xivControlBar QToolButton#xivPosition:hover:enabled { background:#212d3b; }"
+        "QWidget#xivLcd { background:#161d26; border:1px solid #566273; border-radius:4px; }"
+        "QWidget#xivControlBar QToolButton[xivLcdButton=\"true\"] {"
+        " background:transparent; border:0; padding:0; }"
+        "QWidget#xivControlBar QToolButton[xivLcdButton=\"true\"]:hover:enabled { background:#212d3b; }"
         "QWidget#xivControlBar QLabel[xivReadout=\"true\"] { color:#d9e8f7;"
         " background:transparent; font-family:Consolas; font-size:15px; }"
         "QWidget#xivControlBar QLabel[xivCaption=\"true\"] {"
@@ -1144,7 +1186,7 @@ MainWindow::MainWindow(QString initFile)
     bar->setSpacing(3);
     const auto addControl = [controlBar, bar](QAction *action, bool transport = false) {
         auto *button = new QToolButton(controlBar);
-        button->setDefaultAction(action);
+        if (action) button->setDefaultAction(action);
         button->setToolButtonStyle(transport ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextOnly);
         button->setIconSize(QSize(16, 16));
         button->setFixedHeight(30);
@@ -1177,7 +1219,26 @@ MainWindow::MainWindow(QString initFile)
     bar->addSpacing(12);
     addControl(_actionMap.value("back"), true);
     addControl(_actionMap.value("forward"), true);
-    addControl(_actionMap.value("stop"), true);
+    auto *stopButton = addControl(nullptr, true);
+    QAction *stopAction = _actionMap.value("stop");
+    QAction *beginAction = _actionMap.value("back_to_begin");
+    const auto currentStopAction = [stopAction, beginAction]() {
+        return MidiPlayer::isPlaying() || MidiInput::recording() ? stopAction : beginAction;
+    };
+    const auto refreshStopButton = [stopButton, currentStopAction]() {
+        QAction *action = currentStopAction();
+        stopButton->setIcon(action->icon());
+        stopButton->setToolTip(action->toolTip());
+        stopButton->setAccessibleName(action->text());
+        stopButton->setEnabled(action->isEnabled());
+    };
+    connect(stopButton, &QToolButton::clicked, this, [currentStopAction, refreshStopButton]() {
+        currentStopAction()->trigger();
+        refreshStopButton();
+    });
+    connect(stopAction, &QAction::changed, stopButton, refreshStopButton);
+    connect(beginAction, &QAction::changed, stopButton, refreshStopButton);
+    refreshStopButton();
     auto *playButton = addControl(_actionMap.value("play"), true);
     playButton->setObjectName(QStringLiteral("xivPlay"));
     addControl(_actionMap.value("pause"), true);
@@ -1185,47 +1246,55 @@ MainWindow::MainWindow(QString initFile)
     recordButton->setObjectName(QStringLiteral("xivRecord"));
     bar->addSpacing(6);
 
-    auto *position = new QToolButton(controlBar);
-    position->setObjectName(QStringLiteral("xivPosition"));
-    position->setToolTip(tr("Jump to a bar and beat"));
-    position->setAccessibleName(tr("Jump to a bar and beat"));
-    position->setFixedSize(196, 34);
-    auto *readouts = new QHBoxLayout(position);
-    readouts->setContentsMargins(3, 0, 3, 0);
+    auto *lcd = new QWidget(controlBar);
+    lcd->setObjectName(QStringLiteral("xivLcd"));
+    lcd->setFixedHeight(36);
+    auto *readouts = new QHBoxLayout(lcd);
+    readouts->setContentsMargins(2, 1, 2, 1);
     readouts->setSpacing(0);
-    const auto addReadout = [position, readouts](const QString &caption, int stretch) {
+    const auto addReadout = [lcd, readouts](const QString &caption, const QString &tip,
+                                            int width, QLabel *&value) {
         if (readouts->count()) {
-            auto *divider = new QFrame(position);
+            auto *divider = new QFrame(lcd);
             divider->setProperty("xivDivider", true);
             divider->setFixedSize(1, 23);
-            divider->setAttribute(Qt::WA_TransparentForMouseEvents);
             readouts->addWidget(divider, 0, Qt::AlignVCenter);
         }
-        auto *cell = new QWidget(position);
-        cell->setAttribute(Qt::WA_TransparentForMouseEvents);
-        auto *column = new QVBoxLayout(cell);
+        auto *button = new QToolButton(lcd);
+        button->setProperty("xivLcdButton", true);
+        button->setToolTip(tip);
+        button->setAccessibleName(tip);
+        button->setFixedSize(width, 34);
+        auto *column = new QVBoxLayout(button);
         column->setContentsMargins(2, 0, 2, 0);
         column->setSpacing(0);
-        auto *value = new QLabel(QStringLiteral("—"), cell);
+        value = new QLabel(QStringLiteral("—"), button);
         value->setProperty("xivReadout", true);
+        value->setAttribute(Qt::WA_TransparentForMouseEvents);
         value->setAlignment(Qt::AlignCenter);
         column->addWidget(value);
-        auto *label = new QLabel(caption, cell);
+        auto *label = new QLabel(caption, button);
         label->setProperty("xivCaption", true);
+        label->setAttribute(Qt::WA_TransparentForMouseEvents);
         label->setAlignment(Qt::AlignCenter);
         column->addWidget(label);
-        readouts->addWidget(cell, stretch);
-        return value;
+        readouts->addWidget(button);
+        return button;
     };
-    auto *positionValue = addReadout(tr("BAR · BEAT"), 2);
-    auto *tempoValue = addReadout(tr("BPM"), 1);
-    auto *meterValue = addReadout(tr("METER"), 1);
-    bar->addWidget(position);
+    QLabel *positionValue, *tempoValue, *meterValue, *keyValue;
+    auto *position = addReadout(tr("BAR · BEAT"), tr("Jump to a bar and beat"), 76, positionValue);
+    auto *tempoButton = addReadout(tr("BPM"), tr("Edit the project’s starting tempo"), 52, tempoValue);
+    auto *meterButton = addReadout(tr("METER"), tr("Edit the project’s starting time signature"), 55, meterValue);
+    auto *keyButton = addReadout(tr("KEY"), tr("Edit the project’s starting key signature"), 72, keyValue);
+    bar->addWidget(lcd);
     bar->addSpacing(6);
     auto *snapAction = _actionMap.value("magnet");
     snapAction->setIconText(tr("Snap"));
     addControl(snapAction);
     addControl(_actionMap.value("metronome"), true);
+    bar->addSpacing(10);
+    auto *fixChannelsButton = addControl(_fixXIVChannelsTracksAction);
+    fixChannelsButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     bar->addStretch(1);
     auto *more = new QToolButton(controlBar);
     more->setObjectName(QStringLiteral("xivControlMore"));
@@ -1234,31 +1303,48 @@ MainWindow::MainWindow(QString initFile)
     more->setPopupMode(QToolButton::InstantPopup);
     auto *moreMenu = new QMenu(more);
     moreMenu->addAction(_actionMap.value("show_toolbar"));
-    moreMenu->addAction(_actionMap.value("back_to_begin"));
     moreMenu->addAction(_actionMap.value("snap_options"));
-    moreMenu->addSeparator();
-    for (auto *action : {newTrack, _allTracksAudible, _allTracksMute,
-                         _allTracksVisible, _allTracksInvisible, _fixXIVChannelsTracksAction})
-        moreMenu->addAction(action);
     more->setMenu(moreMenu);
     bar->addWidget(more);
 
-    const auto updatePosition = [this, position, positionValue, tempoValue, meterValue](int ms) {
+    // MIDI stores the meter denominator as a power of two (2 means /4).
+    const auto meterAt = [](MidiFile *document, int tick, int &numerator) {
+        int exponent = 2;
+        TimeSignatureEvent *event = nullptr;
+        document->meterAt(tick, &numerator, &exponent, &event);
+        return event ? (1 << std::clamp(exponent, 0, 7)) : 4;
+    };
+    const auto keyName = [](int accidentals, bool minor) {
+        static const char *const majorKeys[] = {
+            "Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#"
+        };
+        static const char *const minorKeys[] = {
+            "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#", "G#", "D#", "A#"
+        };
+        if (accidentals < -7 || accidentals > 7) return QStringLiteral("—");
+        return QString::fromLatin1((minor ? minorKeys : majorKeys)[accidentals + 7]);
+    };
+    const auto updatePosition = [this, position, tempoButton, meterButton, keyButton,
+                                 positionValue, tempoValue, meterValue, keyValue, meterAt, keyName](int ms) {
         MidiFile *document = _arrangementWidget->midiFile();
-        position->setEnabled(document && !MidiInput::recording());
+        const bool recording = MidiInput::recording();
+        const bool playing = MidiPlayer::isPlaying();
+        position->setEnabled(document && !recording);
+        for (auto *button : {tempoButton, meterButton, keyButton})
+            button->setEnabled(document && !playing && !recording);
         if (!document) {
-            positionValue->setText(QStringLiteral("—"));
-            tempoValue->setText(QStringLiteral("—"));
-            meterValue->setText(QStringLiteral("—"));
+            for (auto *value : {positionValue, tempoValue, meterValue, keyValue})
+                value->setText(QStringLiteral("—"));
             return;
         }
-        const int tick = MidiPlayer::isPlaying()
-            ? std::max(0, document->tick(std::max(0, ms)))
-            : std::max(0, document->cursorTick());
-        int start = 0, end = 0, numerator = 4, denominator = 4;
+        const int tick = playing ? std::max(0, document->tick(std::max(0, ms)))
+                                 : std::max(0, document->cursorTick());
+        int start = 0, end = 0, numerator = 4;
         const int measure = document->measure(tick, &start, &end);
-        document->meterAt(tick, &numerator, &denominator);
-        const int beatTicks = std::max(1, document->ticksPerQuarter() * 4 / std::max(1, denominator));
+        const int denominator = meterAt(document, tick, numerator);
+        const int64_t quarterUnits = 4LL * std::max(1, document->ticksPerQuarter());
+        const int64_t beat = 1 + (static_cast<int64_t>(tick) - start) * denominator / quarterUnits;
+
         const auto *tempos = document->channelEvents(17);
         auto tempo = tempos->upperBound(tick);
         int bpm = 120;
@@ -1266,13 +1352,17 @@ MainWindow::MainWindow(QString initFile)
             if (auto *event = dynamic_cast<TempoChangeEvent *>((--tempo).value()))
                 bpm = event->beatsPerQuarter();
         }
-        positionValue->setText(QStringLiteral("%1.%2").arg(measure).arg(1 + (tick - start) / beatTicks));
+        int accidentals = 0;
+        bool minor = false;
+        document->keyAt(tick, &accidentals, &minor);
+        positionValue->setText(QStringLiteral("%1.%2").arg(measure).arg(beat));
         tempoValue->setText(QString::number(bpm));
         meterValue->setText(QStringLiteral("%1/%2").arg(numerator).arg(denominator));
+        keyValue->setText(tr("%1 %2").arg(keyName(accidentals, minor), minor ? tr("min") : tr("maj")));
     };
     _arrangementWidget->positionChanged = updatePosition;
     updatePosition(-1);
-    connect(position, &QToolButton::clicked, this, [this, positionValue, seekArrangementTick]() {
+    connect(position, &QToolButton::clicked, this, [this, positionValue, seekArrangementTick, meterAt]() {
         if (!file || MidiInput::recording()) return;
         const QString current = positionValue->text();
         bool accepted = false;
@@ -1289,18 +1379,98 @@ MainWindow::MainWindow(QString initFile)
         if (parts.size() > 2 || !barOk || !beatOk || measure < 1 ||
             measure > lastMeasure || beat < 1) return;
         const int start = file->startTickOfMeasure(measure);
-        int numerator = 4, denominator = 4;
-        file->meterAt(start, &numerator, &denominator);
+        int numerator = 4;
+        const int denominator = meterAt(file, start, numerator);
         if (beat > numerator) return;
-        const int beatTicks = std::max(1, file->ticksPerQuarter() * 4 / std::max(1, denominator));
-        const int64_t tick = static_cast<int64_t>(start) + (beat - 1) * static_cast<int64_t>(beatTicks);
+        const int64_t offset = (beat - 1) * 4LL * file->ticksPerQuarter();
+        const int64_t tick = start + (offset + denominator - 1) / denominator;
         if (tick <= lastTick)
             seekArrangementTick(static_cast<int>(tick));
     });
+    const auto canEditSignature = [this](MidiFile *document) {
+        return document && file == document && !MidiPlayer::isPlaying() && !MidiInput::recording();
+    };
+    connect(tempoButton, &QToolButton::clicked, this, [this, canEditSignature]() {
+        const QPointer<MidiFile> document(file);
+        if (!canEditSignature(document)) return;
+        auto *event = dynamic_cast<TempoChangeEvent *>(document->channelEvents(17)->value(0));
+        if (!event) return;
+        const int original = event->beatsPerQuarter();
+        bool accepted = false;
+        const int bpm = QInputDialog::getInt(this, tr("Set Starting Tempo"),
+            tr("Beats per minute"), original, 4, 999, 1, &accepted);
+        if (!accepted || !canEditSignature(document) || bpm == original) return;
+        event = dynamic_cast<TempoChangeEvent *>(document->channelEvents(17)->value(0));
+        if (!event) return;
+        document->protocol()->startNewAction(tr("Set Starting Tempo"));
+        event->setBeats(bpm);
+        document->protocol()->endAction();
+    });
+    connect(meterButton, &QToolButton::clicked, this, [this, canEditSignature, meterAt]() {
+        const QPointer<MidiFile> document(file);
+        if (!canEditSignature(document)) return;
+        int originalNumerator = 4;
+        const int originalDenominator = meterAt(document, 0, originalNumerator);
+        const QString original = QStringLiteral("%1/%2").arg(originalNumerator).arg(originalDenominator);
+        bool accepted = false;
+        const QString text = QInputDialog::getText(this, tr("Set Starting Time Signature"),
+            tr("Enter a time signature such as 4/4 or 6/8."), QLineEdit::Normal, original, &accepted);
+        if (!accepted || !canEditSignature(document)) return;
+        const QStringList parts = text.split(QLatin1Char('/'));
+        bool numeratorOk = false, denominatorOk = false;
+        const int numerator = parts.value(0).trimmed().toInt(&numeratorOk);
+        const int denominator = parts.value(1).trimmed().toInt(&denominatorOk);
+        const QList<int> denominators{1, 2, 4, 8, 16, 32, 64, 128};
+        const int exponent = static_cast<int>(denominators.indexOf(denominator));
+        if (parts.size() != 2 || !numeratorOk || !denominatorOk || numerator < 1 ||
+            numerator > 255 || exponent < 0 || 4LL * document->ticksPerQuarter() < denominator) {
+            QMessageBox::warning(this, tr("Invalid Time Signature"),
+                tr("Use a numerator from 1 to 255 and a power-of-two denominator supported by this file."));
+            return;
+        }
+        auto *event = dynamic_cast<TimeSignatureEvent *>(document->channelEvents(18)->value(0));
+        if (!event || (event->num() == numerator && event->denom() == exponent)) return;
+        document->protocol()->startNewAction(tr("Set Starting Time Signature"));
+        if (event->num() != numerator) event->setNumerator(numerator);
+        if (event->denom() != exponent) event->setDenominator(exponent);
+        document->protocol()->endAction();
+    });
+    connect(keyButton, &QToolButton::clicked, this, [this, canEditSignature, keyName]() {
+        const QPointer<MidiFile> document(file);
+        if (!canEditSignature(document)) return;
+        QStringList keys;
+        for (const bool minor : {false, true}) {
+            for (int accidentals = -7; accidentals <= 7; ++accidentals)
+                keys.append(tr("%1 %2").arg(keyName(accidentals, minor), minor ? tr("minor") : tr("major")));
+        }
+        int original = 0;
+        bool originalMinor = false;
+        document->keyAt(0, &original, &originalMinor);
+        bool accepted = false;
+        const QString choice = QInputDialog::getItem(this, tr("Set Starting Key Signature"),
+            tr("Key signature"), keys, std::clamp(original, -7, 7) + 7 + (originalMinor ? 15 : 0),
+            false, &accepted);
+        if (!accepted || !canEditSignature(document)) return;
+        const int index = static_cast<int>(keys.indexOf(choice));
+        if (index < 0) return;
+        const int accidentals = index % 15 - 7;
+        const bool minor = index >= 15;
+        auto *event = dynamic_cast<KeySignatureEvent *>(document->channelEvents(16)->value(0));
+        if (event && event->tonality() == accidentals && event->minor() == minor) return;
+        document->protocol()->startNewAction(tr("Set Starting Key Signature"));
+        if (event) {
+            if (event->tonality() != accidentals) event->setTonality(accidentals);
+            if (event->minor() != minor) event->setMinor(minor);
+        } else {
+            document->channel(16)->insertEvent(new KeySignatureEvent(16, accidentals, minor, document->track(0)), 0);
+        }
+        document->protocol()->endAction();
+    });
+
     // The player object may be replaced for each run. Observe its current state
     // without retaining any connection to a previous PlayerThread.
     auto *transportRefresh = new QTimer(controlBar);
-    connect(transportRefresh, &QTimer::timeout, this, [playButton, recordButton, refreshInspector]() {
+    connect(transportRefresh, &QTimer::timeout, this, [playButton, recordButton, refreshStopButton, refreshInspector, updatePosition]() {
         const auto updateIndicator = [](QToolButton *button, const char *property, bool active) {
             if (button->property(property).toBool() == active) return false;
             button->setProperty(property, active);
@@ -1311,7 +1481,11 @@ MainWindow::MainWindow(QString initFile)
         };
         const bool playChanged = updateIndicator(playButton, "playing", MidiPlayer::isPlaying());
         const bool recordChanged = updateIndicator(recordButton, "recording", MidiInput::recording());
-        if (playChanged || recordChanged) refreshInspector();
+        if (playChanged || recordChanged) {
+            refreshStopButton();
+            refreshInspector();
+            updatePosition(MidiPlayer::isPlaying() ? MidiPlayer::timeMs() : 0);
+        }
     });
     transportRefresh->start(100);
 
@@ -1536,6 +1710,10 @@ void MainWindow::setFile(MidiFile *newFile) {
     // Connect recalcWidgetSize to the matrix widget container
     connect(newFile, SIGNAL(recalcWidgetSize()), _matrixWidgetContainer, SLOT(calcSizes()));
     connect(newFile->protocol(), SIGNAL(actionFinished()), this, SLOT(markEdited()));
+    connect(newFile->protocol(), &Protocol::actionFinished, this, [this, newFile]() {
+        if (file == newFile && _arrangementWidget && !MidiPlayer::isPlaying() && !MidiInput::recording())
+            _arrangementWidget->setCursorMs(newFile->msOfTick(newFile->cursorTick()));
+    });
     connect(newFile->protocol(), SIGNAL(actionFinished()), eventWidget(), SLOT(reload()));
     connect(newFile->protocol(), SIGNAL(actionFinished()), this, SLOT(updateChannelMenu()));
     connect(newFile->protocol(), SIGNAL(actionFinished()), this, SLOT(checkEnableActionsForSelection()));
@@ -1737,7 +1915,10 @@ void MainWindow::stop(bool autoConfirmRecord, bool addEvents, bool resetPause) {
         _matrixWidgetContainer->update();
     }
     if (!MidiInput::recording() && MidiPlayer::isPlaying()) {
+        const int stoppedMs = MidiPlayer::timeMs();
         MidiPlayer::stop();
+        const int endTick = std::max(file->endTick(), file->arrangementEndTick());
+        file->setCursorTick(std::clamp(file->tick(stoppedMs), 0, endTick));
         _miscWidgetContainer->setEnabled(true);
         channelWidget->setEnabled(true);
         _trackWidget->setEnabled(true);
@@ -1747,9 +1928,9 @@ void MainWindow::stop(bool autoConfirmRecord, bool addEvents, bool resetPause) {
         eventWidget()->setEnabled(true);
         // Update playback cursor position using the appropriate widget type
         if (OpenGLMatrixWidget *openglMatrix = qobject_cast<OpenGLMatrixWidget*>(_matrixWidgetContainer)) {
-            openglMatrix->timeMsChanged(MidiPlayer::timeMs(), true);
+            openglMatrix->timeMsChanged(stoppedMs, true);
         } else if (MatrixWidget *matrixWidget = qobject_cast<MatrixWidget*>(_matrixWidgetContainer)) {
-            matrixWidget->timeMsChanged(MidiPlayer::timeMs(), true);
+            matrixWidget->timeMsChanged(stoppedMs, true);
         }
         _trackWidget->setEnabled(true);
         panic();

@@ -13,6 +13,7 @@
 #include <QMouseEvent>
 #include <QContextMenuEvent>
 #include <QPoint>
+#include <QPair>
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QResizeEvent>
@@ -132,6 +133,12 @@ public:
     }
     static constexpr int headerWidth = 326;
     static constexpr int rulerHeight = 34;
+    void setRulerTop(int top) {
+        if (top == _rulerTop) return;
+        _rulerTop = top;
+        update();
+    }
+
     // Two rows of large, readable named actions rather than tiny single letters.
     static constexpr int laneHeight = 114;
 
@@ -327,19 +334,11 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, false);
         p.fillRect(rect(), QColor("#202329"));
-        p.fillRect(0, 0, width(), rulerHeight, QColor("#292D34"));
         p.fillRect(0, 0, headerWidth, height(), QColor("#292D34"));
-
-        p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
-        p.setPen(QColor("#E8EFF8"));
-        p.drawText(QRect(14, 0, headerWidth - 18, rulerHeight), Qt::AlignVCenter,
-                   QStringLiteral("TRACKS  /  RIGHT-CLICK FOR ACTIONS"));
         if (!_file) {
-            p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, 60),
-                       Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("Open a MIDI file"));
+            drawRuler(p, {}, -1);
             return;
         }
-
         // Tempo-aware quarter grid plus actual bar boundaries, including
         // time-signature changes (no hardcoded 4/4 assumption).
         const int tpq = std::max(1, _file->ticksPerQuarter());
@@ -352,7 +351,7 @@ protected:
         // lane backgrounds immediately covered it.
         QVector<int> beatGridXs;
         QVector<int> subBeatGridXs;
-        QVector<int> measureGridXs;
+        QVector<QPair<int, int>> measureMarks;
         const int step16 = std::max(1, tpq / 4);
         for (int q = firstQuarter; q <= lastQuarter && q - firstQuarter < 2000; ++q) {
             const int quarterTick = q * tpq;
@@ -370,11 +369,8 @@ protected:
         int bar = _file->measure(std::max(0, _file->tick(_originMs)), &barStart, &barEnd);
         for (int step = 0; step < 1000 && barStart <= endTick; ++step) {
             const int x = xForMs(_file->msOfTick(barStart));
-            if (x >= headerWidth && x <= width()) {
-                measureGridXs.append(x);
-                p.setPen(QColor("#C4CCD9"));
-                p.drawText(x + 5, 20, QString::number(bar));
-            }
+            if (x >= headerWidth && x <= width())
+                measureMarks.append(qMakePair(x, bar));
             if (barEnd <= barStart) break;
             bar = _file->measure(barEnd, &barStart, &barEnd);
         }
@@ -400,7 +396,8 @@ protected:
             p.setPen(QColor("#4A5360"));
             for (int x : beatGridXs) p.drawLine(x, y + 1, x, y + laneHeight - 2);
             p.setPen(QPen(QColor("#748092"), 1));
-            for (int x : measureGridXs) p.drawLine(x, y + 1, x, y + laneHeight - 2);
+            for (const auto &mark : measureMarks)
+                p.drawLine(mark.first, y + 1, mark.first, y + laneHeight - 2);
             p.restore();
             p.setPen(QColor("#414753"));
             p.drawLine(0, y + laneHeight - 1, width(), y + laneHeight - 1);
@@ -610,13 +607,7 @@ protected:
             p.setPen(QPen(QColor("#FFDD75"), 2));
             p.drawLine(x, 0, x, height());
 
-            // Playhead tab in the ruler, like the arrangement cursor in a DAW.
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor("#FFDD75"));
-            const QPolygon triangle{QPoint(x - 7, 4), QPoint(x + 7, 4),
-                                    QPoint(x, 16)};
-            p.drawPolygon(triangle);
-
             // One marker per track makes it clear that every lane is aligned
             // to the same playback position, including the selected track.
             for (int i = 0; i < tracks.size(); ++i) {
@@ -628,10 +619,11 @@ protected:
             }
             p.restore();
         }
+        drawRuler(p, measureMarks, x);
     }
 
     void contextMenuEvent(QContextMenuEvent *e) override {
-        if (_file && e->pos().x() >= headerWidth && e->pos().y() >= rulerHeight) {
+        if (_file && e->pos().x() >= headerWidth && isLaneY(e->pos().y())) {
             const QPoint pos = e->pos();
             const int row = (pos.y() - rulerHeight) / laneHeight;
             const int tick = snapTick(timelineTickAt(pos.x()));
@@ -670,7 +662,7 @@ protected:
                 return;
             }
         }
-        if (_file && e->pos().x() < headerWidth && e->pos().y() >= rulerHeight) {
+        if (_file && e->pos().x() < headerWidth && isLaneY(e->pos().y())) {
             const int row = (e->pos().y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
@@ -686,7 +678,7 @@ protected:
 
     void mouseDoubleClickEvent(QMouseEvent *e) override {
         if (_file && e->button() == Qt::LeftButton && e->position().x() < headerWidth &&
-            e->position().y() >= rulerHeight &&
+            isLaneY(int(e->position().y())) &&
             (int(e->position().y()) - rulerHeight) % laneHeight < 47) {
             const int row = (int(e->position().y()) - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
@@ -705,7 +697,7 @@ protected:
             return;
         }
         const QPoint pos = e->position().toPoint();
-        if (pos.y() >= rulerHeight && pos.x() < headerWidth) {
+        if (isLaneY(pos.y()) && pos.x() < headerWidth) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 MidiTrack *track = _file->tracks()->at(row);
@@ -742,7 +734,7 @@ protected:
 
         // A click on a real MIDI region selects it; a blank timeline click
         // still seeks and a drag across empty space still pans the view.
-        if (pos.x() >= headerWidth && pos.y() >= rulerHeight) {
+        if (pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
             const xiv::MidiRegion *r = hitRegion(row, pos.x());
             if (r && row >= 0 && row < _file->tracks()->size()) {
@@ -803,7 +795,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
         int hoverTick = -1, hoverRow = -1;
-        if (_file && pos.x() >= headerWidth && pos.y() >= rulerHeight) {
+        if (_file && pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
             const int tick = snapTick(timelineTickAt(pos.x()));
             if (_regions.at(row, tick)) { hoverTick = tick; hoverRow = row; }
@@ -849,7 +841,7 @@ protected:
             e->accept();
             return;
         }
-        if (_file && pos.x() < headerWidth && pos.y() >= rulerHeight) {
+        if (_file && pos.x() < headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->tracks()->size()) {
                 const int top = rulerHeight + row * laneHeight;
@@ -871,7 +863,7 @@ protected:
             }
         }
         QToolTip::hideText();
-        if (_file && pos.x() >= headerWidth && pos.y() >= rulerHeight) {
+        if (_file && pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight) / laneHeight;
             if (const auto *r = hitRegion(row, pos.x())) {
                 const int left = xForMs(_file->msOfTick(r->startTick));
@@ -910,7 +902,7 @@ protected:
             unsetCursor();
             // Region operations stay within the original track; editing is
             // disabled during playback to avoid changing an active scheduler.
-            if (drag && releaseRow == _moveRow) {
+            if (drag && isLaneY(int(e->position().y())) && releaseRow == _moveRow) {
                 switch (_dragMode) {
                 case RegionDragMode::Move: moveRegion(id, targetTick); break;
                 case RegionDragMode::Duplicate: duplicateRegion(id, targetTick); break;
@@ -938,7 +930,7 @@ protected:
                 const int endMs = std::max(_file->maxTime(),
                     _file->msOfTick(_file->arrangementEndTick()));
                 const int clampedMs = std::clamp(desiredMs, 0, endMs);
-                if (pos.y() >= rulerHeight) {
+                if (isLaneY(pos.y())) {
                     const int row = (pos.y() - rulerHeight) / laneHeight;
                     if (row >= 0 && row < _file->tracks()->size()) {
                         MidiTrack *track = _file->tracks()->at(row);
@@ -1043,6 +1035,39 @@ private:
     int _regionTrackCount = 0;
     int _selectedRegionId = 0;
 
+    int _rulerTop = 0;
+
+    bool isLaneY(int y) const { return y >= _rulerTop + rulerHeight; }
+
+    void drawRuler(QPainter &p, const QVector<QPair<int, int>> &marks, int playheadX) const {
+        p.save();
+        p.translate(0, _rulerTop);
+        p.setClipRect(QRect(0, 0, width(), rulerHeight));
+        p.fillRect(0, 0, width(), rulerHeight, QColor("#292D34"));
+        p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+        p.setPen(QColor("#E8EFF8"));
+        p.drawText(QRect(14, 0, headerWidth - 18, rulerHeight), Qt::AlignVCenter, tr("Tracks"));
+        p.setPen(QColor("#515966"));
+        p.drawLine(0, rulerHeight - 1, width(), rulerHeight - 1);
+        p.drawLine(headerWidth, 0, headerWidth, rulerHeight);
+        p.setClipRect(QRect(headerWidth, 0, std::max(0, width() - headerWidth), rulerHeight));
+        p.setPen(QColor("#C4CCD9"));
+        if (!_file)
+            p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, rulerHeight),
+                       Qt::AlignVCenter, tr("Open a MIDI file"));
+        for (const auto &mark : marks)
+            p.drawText(mark.first + 5, 20, QString::number(mark.second));
+        if (playheadX >= headerWidth && playheadX < width()) {
+            p.setPen(QPen(QColor("#FFDD75"), 2));
+            p.drawLine(playheadX, 15, playheadX, rulerHeight);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor("#FFDD75"));
+            p.drawPolygon(QPolygon{QPoint(playheadX - 7, 4), QPoint(playheadX + 7, 4),
+                                   QPoint(playheadX, 16)});
+        }
+        p.restore();
+    }
+
     int visibleTimeMs() const {
         return static_cast<int>(std::ceil(std::max(1, width() - headerWidth) / _scale));
     }
@@ -1074,7 +1099,7 @@ private:
         const xiv::MidiRegion *region = _regions.find(id);
         if (!region || tick <= region->startTick || tick >= region->endTick()) return;
         const int sourceCut = region->sourceStartTick + tick - region->startTick;
-        xiv::CrossingNoteMode choice = xiv::CrossingNoteMode::Keep;
+        xiv::CrossingNoteMode choice = xiv::CrossingNoteMode::Shorten;
         bool hasCrossingNotes = false;
         if (region->trackIndex >= 0 && region->trackIndex < _file->tracks()->size()) {
             MidiTrack *track = _file->tracks()->at(region->trackIndex);
@@ -1091,15 +1116,13 @@ private:
             QDialog dialog(this);
             dialog.setWindowTitle(tr("Notes Crossing Split Point"));
             auto *layout = new QVBoxLayout(&dialog);
-            auto *message = new QLabel(tr("Do you want to keep, shorten, or split "
+            auto *message = new QLabel(tr("Do you want to shorten or split "
                                           "the notes that cross the split point?"), &dialog);
             message->setWordWrap(true);
             layout->addWidget(message);
-            auto *keep = new QRadioButton(tr("Keep - let notes sustain past the split"), &dialog);
             auto *shorten = new QRadioButton(tr("Shorten - end notes at the split"), &dialog);
             auto *split = new QRadioButton(tr("Split - retrigger notes in the next region"), &dialog);
-            keep->setChecked(true);
-            layout->addWidget(keep);
+            shorten->setChecked(true);
             layout->addWidget(shorten);
             layout->addWidget(split);
             auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
@@ -1110,8 +1133,7 @@ private:
                              &dialog, &QDialog::reject);
             layout->addWidget(buttons);
             if (dialog.exec() != QDialog::Accepted) return;
-            if (shorten->isChecked()) choice = xiv::CrossingNoteMode::Shorten;
-            else if (split->isChecked()) choice = xiv::CrossingNoteMode::Split;
+            if (split->isChecked()) choice = xiv::CrossingNoteMode::Split;
         }
         // Snapshot BEFORE modifying the region model. Register the operation
         // in the same MIDI Protocol used by Ctrl+Z / Ctrl+Y elsewhere.
