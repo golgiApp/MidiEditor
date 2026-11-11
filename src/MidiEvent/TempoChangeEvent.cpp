@@ -18,25 +18,25 @@
 
 #include "TempoChangeEvent.h"
 #include "../midi/MidiFile.h"
+#include <algorithm>
+#include <cmath>
 
 TempoChangeEvent::TempoChangeEvent(int channel, int value, MidiTrack *track)
     : MidiEvent(channel, track) {
-    _beats = 60000000 / value;
+    _microseconds = std::clamp(value, 1, 0xFFFFFF);
 }
 
 TempoChangeEvent::TempoChangeEvent(TempoChangeEvent &other)
     : MidiEvent(other) {
-    _beats = other._beats;
+    _microseconds = other._microseconds;
 }
 
 int TempoChangeEvent::beatsPerQuarter() {
-    return _beats;
+    return static_cast<int>(std::lround(60000000.0 / _microseconds));
 }
 
 double TempoChangeEvent::msPerTick() {
-    double quarters_per_second = (double) _beats / 60;
-    double ticks_per_second = (double) (file()->ticksPerQuarter()) * quarters_per_second;
-    return 1000 / (ticks_per_second);
+    return _microseconds / (1000.0 * std::max(1, file()->ticksPerQuarter()));
 }
 
 ProtocolEntry *TempoChangeEvent::copy() {
@@ -49,7 +49,7 @@ void TempoChangeEvent::reloadState(ProtocolEntry *entry) {
         return;
     }
     MidiEvent::reloadState(entry);
-    _beats = other->_beats;
+    _microseconds = other->_microseconds;
     if (file()) file()->calcMaxTime();
 }
 
@@ -63,7 +63,7 @@ QByteArray TempoChangeEvent::save() {
     array.append(char(0xFF));
     array.append(char(0x51));
     array.append(char(0x03));
-    int value = 60000000 / _beats;
+    const int value = _microseconds;
     for (int i = 2; i >= 0; i--) {
         array.append((value & (0xFF << 8 * i)) >> 8 * i);
     }
@@ -73,7 +73,7 @@ QByteArray TempoChangeEvent::save() {
 
 void TempoChangeEvent::setBeats(int beats) {
     ProtocolEntry *toCopy = copy();
-    _beats = beats;
+    _microseconds = 60000000 / std::clamp(beats, 4, 999);
     file()->calcMaxTime();
     protocol(toCopy, this);
 }

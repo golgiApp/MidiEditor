@@ -139,8 +139,8 @@ public:
      * \return JSON result with success, tier, channelMap, summary
      */
     static QJsonObject fixChannels(MidiFile *file,
-                                   int forcedTier = 0,
-                                   FixOptions options = FixOptions(),
+                                   int forcedTier,
+                                   FixOptions options,
                                    ProgressCallback progress = nullptr);
 
 private:

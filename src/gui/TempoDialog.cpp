@@ -1,5 +1,6 @@
 #include "TempoDialog.h"
 #include "Appearance.h"
+#include "../midi/TempoMapEdit.h"
 
 #include <QGridLayout>
 #include <QLabel>
@@ -79,16 +80,16 @@ TempoDialog::TempoDialog(MidiFile *file, int startTick, int endTick, QWidget *pa
     QLabel *beginLabel = new QLabel("Starting From:");
     layout->addWidget(beginLabel, 4, 1, 1, 1);
     _startBeats = new QSpinBox();
-    _startBeats->setMinimum(1);
-    _startBeats->setMaximum(500);
+    _startBeats->setMinimum(4);
+    _startBeats->setMaximum(999);
     _startBeats->setValue(beats);
     layout->addWidget(_startBeats, 4, 2, 1, 1);
 
     QLabel *endLabel = new QLabel("New Tempo:");
     layout->addWidget(endLabel, 5, 1, 1, 1);
     _endBeats = new QSpinBox();
-    _endBeats->setMinimum(1);
-    _endBeats->setMaximum(500);
+    _endBeats->setMinimum(4);
+    _endBeats->setMaximum(999);
     _endBeats->setValue(beats);
     layout->addWidget(_endBeats, 5, 2, 1, 1);
 
@@ -123,42 +124,21 @@ TempoDialog::TempoDialog(MidiFile *file, int startTick, int endTick, QWidget *pa
 }
 
 void TempoDialog::accept() {
-    MidiTrack *generalTrack = _file->track(0);
-    _file->protocol()->startNewAction("Edit Tempo");
-
-    // Delete all events in range
-    QList<MidiEvent *> toRemove;
-    QMap<int, MidiEvent *> *events = _file->tempoEvents();
-    QMap<int, MidiEvent *>::iterator it = events->begin();
-    int fromTick = _startTick;
-    int toTick = _startTick;
-    if (_endTick > -1) {
-        toTick = _endTick;
+    auto points = xiv::readTempoMap(_file);
+    const int end = _smoothTransition->isChecked() ? _endTick : _startTick;
+    if (end < _startTick) return;
+    auto point = points.lowerBound(_startTick);
+    if (point != points.begin()) std::prev(point).value().rampToNext = false;
+    while (point != points.end() && point.key() <= end) point = points.erase(point);
+    xiv::TempoPoint tempo;
+    tempo.setBpm(_startBeats->value());
+    if (end > _startTick) {
+        tempo.rampToNext = true;
+        points.insert(_startTick, tempo);
     }
-    while (it != events->end()) {
-        if (it.key() >= fromTick && it.key() <= toTick) {
-            toRemove.append(it.value());
-        }
-        it++;
-    }
-    foreach(MidiEvent *ev, toRemove) {
-        _file->channel(17)->removeEvent(ev);
-    }
-
-    if (_smoothTransition->isChecked()) {
-        int startBeats = _startBeats->value();
-        int endBeats = _endBeats->value();
-
-        for (int tick = _startTick; tick < _endTick; tick += 5) {
-            int beats = startBeats + (endBeats - startBeats) * (tick - _startTick) / (_endTick - _startTick);
-            _file->channel(17)->insertEvent(new TempoChangeEvent(17, 60000000 / beats, generalTrack), tick);
-        }
-        _file->channel(17)->insertEvent(new TempoChangeEvent(17, 60000000 / endBeats, generalTrack), _endTick);
-    } else {
-        int beats = _endBeats->value();
-        _file->channel(17)->insertEvent(new TempoChangeEvent(17, 60000000 / beats, generalTrack), _startTick);
-    }
-    hide();
-
-    _file->protocol()->endAction();
+    tempo.rampToNext = false;
+    tempo.setBpm(_endBeats->value());
+    points.insert(end, tempo);
+    xiv::writeTempoMap(_file, points, tr("Edit Tempo"));
+    QDialog::accept();
 }

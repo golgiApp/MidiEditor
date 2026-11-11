@@ -43,6 +43,7 @@
 #include <QHash>
 #include "math.h"
 #include <algorithm>
+#include "TempoMapEdit.h"
 
 static QList<MidiEvent *> getSortedEvents(QMultiMap<int, MidiEvent *> *map) {
     QList<MidiEvent *> events = map->values();
@@ -299,7 +300,18 @@ bool MidiFile::readMidiFile(QDataStream *content, QStringList *log) {
     }
 
     OffEvent::clearOnEvents();
-
+    if (_tracks->isEmpty()) return false;
+    MidiTrack *firstTrack = _tracks->first();
+    if (!channel(18)->eventMap()->contains(0)) {
+        auto *meter = new TimeSignatureEvent(18, 4, 2, 24, 8, firstTrack);
+        meter->setFile(this);
+        channel(18)->eventMap()->insert(0, meter);
+    }
+    if (!channel(17)->eventMap()->contains(0)) {
+        auto *tempo = new TempoChangeEvent(17, 500000, firstTrack);
+        tempo->setFile(this);
+        channel(17)->eventMap()->insert(0, tempo);
+    }
     return true;
 }
 
@@ -338,6 +350,8 @@ bool MidiFile::readTrack(QDataStream *content, int num, QStringList *log) {
     quint32 numBytes;
     (*content) >> numBytes;
 
+    const qint64 chunkEnd = content->device()->pos() + numBytes;
+    if (chunkEnd > content->device()->size()) return false;
     bool ok = true;
     bool endEvent = false;
     int position = 0;
@@ -355,9 +369,7 @@ bool MidiFile::readTrack(QDataStream *content, int num, QStringList *log) {
 
     while (!endEvent) {
         // Essential safety: prevent infinite loops from corrupted data
-        if (content->atEnd()) {
-            break;
-        }
+        if (content->device()->pos() >= chunkEnd) break;
 
         position += deltaTime(content);
 
@@ -404,32 +416,9 @@ bool MidiFile::readTrack(QDataStream *content, int num, QStringList *log) {
         }
     }
 
-    // end of track
-    (*content) >> tempByte;
-    QString errorText = tr("Error: track ") + QString::number(num) + tr("not ended as expected. ");
-    if (tempByte != 0x00) {
-        log->append(errorText);
+    // The declared chunk length also covers the EOT length byte and any padding.
+    if (content->device()->pos() > chunkEnd || !content->device()->seek(chunkEnd))
         return false;
-    }
-
-    // check whether TimeSignature at tick 0 is given. If not, create one.
-    // this will be done after reading the first track
-    if (!channel(18)->eventMap()->contains(0)) {
-        log->append(tr("Warning: no TimeSignatureEvent detected at tick 0. Adding default value."));
-        TimeSignatureEvent *timeSig = new TimeSignatureEvent(18, 4, 2, 24, 8, track);
-        timeSig->setFile(this);
-        timeSig->setTrack(track, false);
-        channel(18)->eventMap()->insert(0, timeSig);
-    }
-
-    // check whether TempoChangeEvent at tick 0 is given. If not, create one.
-    if (!channel(17)->eventMap()->contains(0)) {
-        log->append("Warning: no TempoChangeEvent detected at tick 0. Adding default value.");
-        TempoChangeEvent *tempoEv = new TempoChangeEvent(17, 500000, track);
-        tempoEv->setFile(this);
-        tempoEv->setTrack(track, false);
-        channel(17)->eventMap()->insert(0, tempoEv);
-    }
 
     // assign channel
     int assignedChannel = 0;
@@ -582,11 +571,10 @@ int MidiFile::tick(int ms) {
 
 int MidiFile::msOfTick(int tick, QList<MidiEvent *> *events, int
                        msOfFirstEventInList) {
+    QList<MidiEvent *> localEvents;
     if (!events) {
-        events = new QList<MidiEvent *>(getSortedEvents(channels[17]->eventMap()));
-        if (!events) {
-            return 0;
-        }
+        localEvents = getSortedEvents(channels[17]->eventMap());
+        events = &localEvents;
     }
 
     // timeMs holds the time of the current tick
@@ -1721,20 +1709,21 @@ bool MidiFile::save(QString path) {
     }
 
     // A format-0 source becomes format 1 when the arrangement adds tracks.
-    const int outputFormat = numTracks() > 1 ? 1 : _midiFormat;
+    const int outputTrackCount = std::max(1, numTracks());
+    const int outputFormat = outputTrackCount > 1 ? 1 : _midiFormat;
     for (int i = 1; i >= 0; i--) {
         data.append((qint8) ((outputFormat & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
-        data.append((qint8) ((numTracks() & (0xFF << 8 * i)) >> 8 * i));
+        data.append((qint8) ((outputTrackCount & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
         data.append((qint8) ((timePerQuarter & (0xFF << 8 * i)) >> 8 * i));
     }
 
-    for (int num = 0; num < numTracks(); num++) {
+    for (int num = 0; num < outputTrackCount; num++) {
         data.append('M');
         data.append('T');
         data.append('r');
@@ -1754,7 +1743,7 @@ bool MidiFile::save(QString path) {
             MidiEvent *event = it.value();
             int tick = it.key();
 
-            if (_tracks->at(num) == event->track()) {
+            if (_tracks->isEmpty() || _tracks->at(num) == event->track()) {
                 // write the deltaTime before the event
                 int time = tick - currentTick;
                 QByteArray deltaTime = writeDeltaTime(time);
@@ -1830,7 +1819,7 @@ bool MidiFile::saveArrangedMidi(QString path) {
     QByteArray data;
     data.append("MThd", 4);
     data.append(char(0)); data.append(char(0)); data.append(char(0)); data.append(char(6));
-    const int trackCount = numTracks();
+    const int trackCount = std::max(1, numTracks());
     const int outputFormat = trackCount > 1 ? 1 : _midiFormat;
     data.append(char((outputFormat >> 8) & 255)); data.append(char(outputFormat & 255));
     data.append(char((trackCount >> 8) & 255)); data.append(char(trackCount & 255));
@@ -1838,8 +1827,8 @@ bool MidiFile::saveArrangedMidi(QString path) {
     const int finalEnd = std::max(endTick(), arrangementEndTick());
     for (int t = 0; t < trackCount; ++t) {
         QByteArray trackBytes;
-        MidiTrack *track = _tracks->at(t);
-        if (auto *name = track->nameEvent()) {
+        MidiTrack *track = _tracks->value(t);
+        if (auto *name = track ? track->nameEvent() : nullptr) {
             // A track name belongs to its own MTrk chunk, even though the
             // editor stores text events in the shared meta-event channel.
             trackBytes.append(writeDeltaTime(0));
@@ -2033,20 +2022,21 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
     }
 
     // A format-0 source becomes format 1 when the arrangement adds tracks.
-    const int outputFormat = numTracks() > 1 ? 1 : _midiFormat;
+    const int outputTrackCount = std::max(1, numTracks());
+    const int outputFormat = outputTrackCount > 1 ? 1 : _midiFormat;
     for (int i = 1; i >= 0; i--) {
         data.append((qint8) ((outputFormat & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
-        data.append((qint8) ((numTracks() & (0xFF << 8 * i)) >> 8 * i));
+        data.append((qint8) ((outputTrackCount & (0xFF << 8 * i)) >> 8 * i));
     }
 
     for (int i = 1; i >= 0; i--) {
         data.append((qint8) ((timePerQuarter & (0xFF << 8 * i)) >> 8 * i));
     }
 
-    for (int num = 0; num < numTracks(); num++) {
+    for (int num = 0; num < outputTrackCount; num++) {
         data.append('M');
         data.append('T');
         data.append('r');
@@ -2072,7 +2062,7 @@ bool MidiFile::saveForExport(QString path, int startTick, int endTick) {
                 if (num != 0) skip = true;
             } else {
                 // Regular events must match the current track
-                if (_tracks->at(num) != event->track()) skip = true;
+                if (_tracks->value(num) != event->track()) skip = true;
             }
 
             if (!skip) {
@@ -2206,10 +2196,13 @@ void MidiFile::addTrack() {
     ProtocolEntry *toCopy = copy();
     MidiTrack *track = new MidiTrack(this);
     track->setNumber(_tracks->size());
-    if (track->number() > 0) {
-        track->assignChannel(track->number() - 1);
-    }
+    track->assignChannel(std::max(0, track->number() - 1));
     _tracks->append(track);
+    if (_tracks->size() == 1) {
+        for (int ch : {16, 17, 18})
+            for (auto *event : *channels[ch]->eventMap())
+                if (ch >= 17 || xiv::tempoRampMarker(event)) event->setTrack(track);
+    }
     track->setName("New Track");
     int n = 0;
     foreach(MidiTrack* track, *_tracks) {
@@ -2220,7 +2213,7 @@ void MidiFile::addTrack() {
 }
 
 bool MidiFile::removeTrack(MidiTrack *track) {
-    if (numTracks() < 2) {
+    if (!_tracks->contains(track)) {
         return false;
     }
 
@@ -2241,8 +2234,10 @@ bool MidiFile::removeTrack(MidiTrack *track) {
     while (it != allEvents.end()) {
         MidiEvent *event = it.value();
         if (event->track() == track) {
-            if (!channels[event->channel()]->removeEvent(event)) {
-                event->setTrack(_tracks->first());
+            if (event->channel() >= 17 || xiv::tempoRampMarker(event)) {
+                if (!_tracks->isEmpty()) event->setTrack(_tracks->first());
+            } else {
+                channels[event->channel()]->removeEvent(event);
             }
         }
         it++;
@@ -2273,7 +2268,7 @@ bool MidiFile::removeTrack(MidiTrack *track) {
 }
 
 MidiTrack *MidiFile::track(int number) {
-    if (_tracks->size() > number) {
+    if (number >= 0 && _tracks->size() > number) {
         return _tracks->at(number);
     } else {
         return 0;

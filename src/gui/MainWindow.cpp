@@ -726,7 +726,8 @@ MainWindow::MainWindow(QString initFile)
     lanesLayout->addWidget(arrangementScrollRow);
     leftSplitter->insertWidget(0, arrangementPane);
     _arrangementWidget->selectTrackRequested = [this](MidiTrack *track) {
-        editTrackAndChannel(track);
+        if (track) editTrackAndChannel(track);
+        else editTrack(-1, false);
     };
     _arrangementWidget->trackMenuRequested = [this](MidiTrack *track, const QPoint &globalPos) {
         if (_trackWidget) _trackWidget->showTrackContextMenu(track, globalPos);
@@ -1231,6 +1232,10 @@ MainWindow::MainWindow(QString initFile)
     setCentralWidget(central);
 
     QWidget *buttons = setupActions(central);
+    _arrangementWidget->commandShortcuts = [this](const QString &id) {
+        auto *action = _actionMap.value(id);
+        return action ? action->shortcuts() : QList<QKeySequence>{};
+    };
     if (auto *editingToolbar = _actionMap.value("show_toolbar")) {
         buttons->setVisible(editingToolbar->isChecked());
     }
@@ -1335,36 +1340,38 @@ MainWindow::MainWindow(QString initFile)
     readouts->setContentsMargins(2, 1, 2, 1);
     readouts->setSpacing(0);
     const auto addReadout = [lcd, readouts](const QString &caption, const QString &tip,
-                                            int width, QLabel *&value) {
+                                            int width, QLabel *&value, bool interactive = true) {
         if (readouts->count()) {
             auto *divider = new QFrame(lcd);
             divider->setProperty("xivDivider", true);
             divider->setFixedSize(1, 23);
             readouts->addWidget(divider, 0, Qt::AlignVCenter);
         }
-        auto *button = new QToolButton(lcd);
-        button->setProperty("xivLcdButton", true);
-        button->setToolTip(tip);
-        button->setAccessibleName(tip);
-        button->setFixedSize(width, 34);
-        auto *column = new QVBoxLayout(button);
+        auto *button = interactive ? new QToolButton(lcd) : nullptr;
+        QWidget *readout = button ? static_cast<QWidget *>(button) : new QWidget(lcd);
+        if (button) button->setProperty("xivLcdButton", true);
+        readout->setToolTip(tip);
+        readout->setAccessibleName(tip);
+        readout->setFixedSize(width, 34);
+        auto *column = new QVBoxLayout(readout);
         column->setContentsMargins(2, 0, 2, 0);
         column->setSpacing(0);
-        value = new QLabel(QStringLiteral("—"), button);
+        value = new QLabel(QStringLiteral("—"), readout);
         value->setProperty("xivReadout", true);
         value->setAttribute(Qt::WA_TransparentForMouseEvents);
         value->setAlignment(Qt::AlignCenter);
         column->addWidget(value);
-        auto *label = new QLabel(caption, button);
+        auto *label = new QLabel(caption, readout);
         label->setProperty("xivCaption", true);
         label->setAttribute(Qt::WA_TransparentForMouseEvents);
         label->setAlignment(Qt::AlignCenter);
         column->addWidget(label);
-        readouts->addWidget(button);
+        readouts->addWidget(readout);
         return button;
     };
-    QLabel *positionValue, *tempoValue, *meterValue, *keyValue;
+    QLabel *positionValue, *timeValue, *tempoValue, *meterValue, *keyValue;
     auto *position = addReadout(tr("BAR · BEAT"), tr("Jump to a bar and beat"), 76, positionValue);
+    addReadout(tr("TIME"), tr("Elapsed playhead time (minutes:seconds.hundredths)"), 108, timeValue, false);
     auto *tempoButton = addReadout(tr("BPM"), tr("Edit the project’s starting tempo"), 52, tempoValue);
     auto *meterButton = addReadout(tr("METER"), tr("Edit the project’s starting time signature"), 55, meterValue);
     auto *keyButton = addReadout(tr("KEY"), tr("Edit the project’s starting key signature"), 72, keyValue);
@@ -1413,7 +1420,7 @@ MainWindow::MainWindow(QString initFile)
         return QString::fromLatin1((minor ? minorKeys : majorKeys)[accidentals + 7]);
     };
     const auto updatePosition = [this, position, tempoButton, meterButton, keyButton,
-                                 positionValue, tempoValue, meterValue, keyValue, meterAt, keyName](int ms) {
+                                 positionValue, timeValue, tempoValue, meterValue, keyValue, meterAt, keyName](int ms) {
         MidiFile *document = _arrangementWidget->midiFile();
         const bool recording = MidiInput::recording();
         const bool playing = MidiPlayer::isPlaying();
@@ -1421,7 +1428,7 @@ MainWindow::MainWindow(QString initFile)
         for (auto *button : {tempoButton, meterButton, keyButton})
             button->setEnabled(document && !playing && !recording);
         if (!document) {
-            for (auto *value : {positionValue, tempoValue, meterValue, keyValue})
+            for (auto *value : {positionValue, timeValue, tempoValue, meterValue, keyValue})
                 value->setText(QStringLiteral("—"));
             return;
         }
@@ -1444,6 +1451,11 @@ MainWindow::MainWindow(QString initFile)
         bool minor = false;
         document->keyAt(tick, &accidentals, &minor);
         positionValue->setText(QStringLiteral("%1.%2").arg(measure).arg(beat));
+        const int hundredths = std::max(0, playing || recording ? ms : document->msOfTick(tick)) / 10;
+        timeValue->setText(QStringLiteral("%1:%2.%3")
+            .arg(hundredths / 6000, 2, 10, QLatin1Char('0'))
+            .arg((hundredths / 100) % 60, 2, 10, QLatin1Char('0'))
+            .arg(hundredths % 100, 2, 10, QLatin1Char('0')));
         tempoValue->setText(QString::number(bpm));
         meterValue->setText(QStringLiteral("%1/%2").arg(numerator).arg(denominator));
         keyValue->setText(tr("%1 %2").arg(keyName(accidentals, minor), minor ? tr("min") : tr("maj")));
@@ -1488,11 +1500,9 @@ MainWindow::MainWindow(QString initFile)
         const int bpm = QInputDialog::getInt(this, tr("Set Starting Tempo"),
             tr("Beats per minute"), original, 4, 999, 1, &accepted);
         if (!accepted || !canEditSignature(document) || bpm == original) return;
-        event = dynamic_cast<TempoChangeEvent *>(document->channelEvents(17)->value(0));
-        if (!event) return;
-        document->protocol()->startNewAction(tr("Set Starting Tempo"));
-        event->setBeats(bpm);
-        document->protocol()->endAction();
+        auto points = xiv::readTempoMap(document);
+        points[0].setBpm(bpm);
+        xiv::writeTempoMap(document, points, tr("Set Starting Tempo"));
     });
     connect(meterButton, &QToolButton::clicked, this, [this, canEditSignature, meterAt]() {
         const QPointer<MidiFile> document(file);
@@ -3504,15 +3514,18 @@ void MainWindow::removeTrack(int tracknumber) {
         return;
     }
     MidiTrack *track = file->track(tracknumber);
+    if (!track || MidiPlayer::isPlaying() || MidiInput::recording()) return;
+    const auto oldTracks = *file->tracks();
     file->protocol()->startNewAction(tr("Remove Track"));
-    foreach(MidiEvent* event, Selection::instance()->selectedEvents()) {
-        if (event->track() == track) {
-            EventTool::deselectEvent(event);
-        }
+    foreach (MidiEvent *event, Selection::instance()->selectedEvents()) {
+        if (event->track() == track) EventTool::deselectEvent(event);
     }
     Selection::instance()->setSelection(Selection::instance()->selectedEvents());
-    if (!file->removeTrack(track)) {
-        QMessageBox::warning(this, tr("Error"), QString(tr("The selected track can\'t be removed!\n It\'s the last track of the file.")));
+    if (_arrangementWidget) _arrangementWidget->setTrackLayoutEditing(true);
+    const bool removed = file->removeTrack(track);
+    if (_arrangementWidget) {
+        if (removed) _arrangementWidget->recordTrackLayoutChange(oldTracks);
+        _arrangementWidget->setTrackLayoutEditing(false);
     }
     file->protocol()->endAction();
     updateTrackMenu();
@@ -4407,7 +4420,8 @@ void MainWindow::splitChannelsToTracks(MidiTrack *sourceTrack) {
 }
 
 void MainWindow::cloneTrack(MidiTrack *source) {
-    if (!file || !source) return;
+    if (!file || !source || !file->tracks()->contains(source) ||
+        MidiPlayer::isPlaying() || MidiInput::recording()) return;
 
     // A MIDI track and a MIDI channel are independent concepts. Cloning
     // into the same channel causes both tracks to share instrument/CC state.
@@ -4435,9 +4449,9 @@ void MainWindow::cloneTrack(MidiTrack *source) {
     // Collapsing multiple source channels into one would lose distinctions
     // between the source instruments and controllers.
     if (sourceIsMultichannel) {
-        QMessageBox::warning(this, tr("Cannot Clone Track to One Channel"),
+        QMessageBox::warning(this, tr("Cannot Copy Track to One Channel"),
             tr("This track contains MIDI events on multiple channels. "
-               "Split its channels into separate tracks before cloning "
+               "Split its channels into separate tracks before copying "
                "to preserve instruments and controller data."));
         return;
     }
@@ -4448,7 +4462,7 @@ void MainWindow::cloneTrack(MidiTrack *source) {
     // their sound, but sharing channel 10 would violate clone isolation.
     if (sourceChannel == 9 || source->assignedChannel() == 9) {
         QMessageBox::warning(this, tr("Cannot Isolate Drum Track"),
-            tr("MIDI channel 10 is reserved for percussion. Cloning the "
+            tr("MIDI channel 10 is reserved for percussion. Copying the "
                "drums onto a melodic channel would change their sounds. "
                "The original drum track was not modified."));
         return;
@@ -4459,18 +4473,22 @@ void MainWindow::cloneTrack(MidiTrack *source) {
     if (targetChannel < 0) {
         QMessageBox::warning(this, tr("No Unused MIDI Channels"),
             tr("All 15 melodic MIDI channels are assigned or contain "
-               "events. Free a channel before cloning this track. "
+               "events. Free a channel before copying this track. "
                "Nothing was changed."));
         return;
     }
 
-    file->protocol()->startNewAction(tr("Clone Track (Independent Channel)"));
+    const auto oldTracks = *file->tracks();
+    file->protocol()->startNewAction(tr("Copy Track"));
+    if (_arrangementWidget) _arrangementWidget->setTrackLayoutEditing(true);
 
     // Create the new track on its own MIDI channel.
     file->addTrack();
     MidiTrack *newTrack = file->tracks()->last();
     newTrack->setName(source->name() + tr(" (copy)"));
     newTrack->assignChannel(targetChannel);
+    newTrack->setMuted(source->muted());
+    newTrack->setHidden(source->hidden());
 
     // Keep the clone directly underneath the source in the track list.
     const int originalIndex = file->tracks()->indexOf(source);
@@ -4484,11 +4502,11 @@ void MainWindow::cloneTrack(MidiTrack *source) {
     // Snapshot before insertion. Note-on/off pairs must be created together
     // on targetChannel; copy channel-specific controllers/program changes
     // there as well so the instruments no longer share playback state.
-    bool copiedOwnProgram = false;
+    bool hasInitialProgram = false;
     for (int ch = 0; ch < 16; ++ch) {
         for (MidiEvent *ev : *file->channel(ch)->eventMap()) {
-            if (ev->track() == source && dynamic_cast<ProgChangeEvent *>(ev)) {
-                copiedOwnProgram = true;
+            if (ev->track() == source && ev->midiTime() == 0 && dynamic_cast<ProgChangeEvent *>(ev)) {
+                hasInitialProgram = true;
                 break;
             }
         }
@@ -4499,7 +4517,8 @@ void MainWindow::cloneTrack(MidiTrack *source) {
         const QList<int> ticks = emap->uniqueKeys();
         for (int tick : ticks) {
             const QList<MidiEvent *> events = emap->values(tick);
-            for (MidiEvent *ev : events) {
+            for (auto event = events.crbegin(); event != events.crend(); ++event) {
+                MidiEvent *ev = *event;
                 if (ev->track() != source) continue;
                 if (ev == source->nameEvent()) continue; // already named
 
@@ -4518,7 +4537,7 @@ void MainWindow::cloneTrack(MidiTrack *source) {
                         // channel. Global/meta events retain their type.
                         const int outputChannel = ch < 16 ? targetChannel : ch;
                         if (ch < 16) copy->setChannel(targetChannel, false);
-                        file->channel(outputChannel)->insertEvent(copy, tick, false);
+                        file->channel(outputChannel)->insertEvent(copy, tick);
                     } else {
                         delete pe;
                     }
@@ -4529,14 +4548,18 @@ void MainWindow::cloneTrack(MidiTrack *source) {
 
     // When the source inherited its program from another track using the
     // same channel, preserve the initial instrument on the new channel too.
-    if (!copiedOwnProgram) {
-        const int initialProgram = file->channel(sourceChannel)->progAtTick(0);
+    if (!hasInitialProgram) {
+        const int initialProgram = sourceChannel >= 0 ? file->channel(sourceChannel)->progAtTick(0) : 0;
         file->channel(targetChannel)->insertEvent(
-            new ProgChangeEvent(targetChannel, initialProgram, newTrack), 0, false);
+            new ProgChangeEvent(targetChannel, initialProgram, newTrack), 0);
     }
 
+    if (_arrangementWidget) {
+        _arrangementWidget->recordTrackLayoutChange(oldTracks, originalIndex, originalIndex + 1, targetChannel);
+        _arrangementWidget->setTrackLayoutEditing(false);
+    }
     file->protocol()->endAction();
-    statusBar()->showMessage(tr("Cloned '%1' to independent MIDI channel %2")
+    statusBar()->showMessage(tr("Copied '%1' to independent MIDI channel %2")
         .arg(source->name()).arg(targetChannel + 1), 5000);
     updateAll();
 }
@@ -6759,8 +6782,34 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     helpMB->addAction(checkUpdatesAction);
 
     // Use full custom toolbar with settings integration
+    const auto arrangementBinding = [this](const QString &id, const QString &name, QKeySequence binding) {
+        auto *action = new QAction(name, this);
+        action->setShortcut(binding);
+        _actionMap[id] = action;
+        _defaultShortcuts[id] = action->shortcuts();
+    };
+    arrangementBinding(QStringLiteral("xiv_split_regions"), tr("Split Regions at Playhead"), QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key_T)));
+    arrangementBinding(QStringLiteral("xiv_join_regions"), tr("Join Selected Regions"), QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key_J)));
+    arrangementBinding(QStringLiteral("xiv_arrangement_delete"), tr("Delete in Arrangement"),
+                       QKeySequence(Qt::Key_Backspace));
+
     // Apply any stored custom shortcuts from settings after defining defaults
     applyStoredShortcuts();
+    for (auto *action : _actionMap) {
+        if (!action) continue;
+        action->setShortcutVisibleInContextMenu(true);
+        const QString base = action->toolTip();
+        const auto refresh = [action, base]() {
+            QStringList bindings;
+            for (const auto &binding : action->shortcuts())
+                if (!binding.isEmpty()) bindings.append(binding.toString(QKeySequence::NativeText));
+            const QString tip = bindings.isEmpty() ? base :
+                base + QStringLiteral(" (") + bindings.join(QStringLiteral(", ")) + QLatin1Char(')');
+            if (action->toolTip() != tip) action->setToolTip(tip);
+        };
+        connect(action, &QAction::changed, action, refresh);
+        refresh();
+    }
 
     _toolbarWidget = createCustomToolbar(parent);
     return _toolbarWidget;
@@ -7810,10 +7859,7 @@ void MainWindow::applyStoredShortcuts() {
             if (s.trimmed().isEmpty()) continue;
             seqs << QKeySequence::fromString(s.trimmed());
         }
-        if (!seqs.isEmpty()) {
-            if (seqs.size() == 1) action->setShortcut(seqs.first());
-            else action->setShortcuts(seqs);
-        }
+        action->setShortcuts(seqs);
     }
     _settings->endGroup();
 }

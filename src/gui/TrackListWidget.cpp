@@ -347,7 +347,7 @@ void TrackListWidget::showTrackContextMenu(MidiTrack *track, const QPoint &globa
     menu.addSeparator();
     
     // Group 1: Track Management
-    QAction *cloneAction = menu.addAction(tr("Clone Track"));
+    QAction *cloneAction = menu.addAction(tr("Copy Track"));
     
     QMenu *mergeMenu = menu.addMenu(tr("Merge Track..."));
     QList<MidiTrack*> otherTracks;

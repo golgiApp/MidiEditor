@@ -61,6 +61,7 @@ public:
      * \return The tempo in BPM (beats per minute)
      */
     int beatsPerQuarter();
+    int microsecondsPerQuarter() const { return _microseconds; }
 
     /**
      * \brief Gets the duration of one MIDI tick in milliseconds.
@@ -106,7 +107,7 @@ public:
 
 private:
     /** \brief Tempo value in microseconds per quarter note */
-    int _beats;
+    int _microseconds;
 };
 
 #endif // TEMPOCHANGEEVENT_H_

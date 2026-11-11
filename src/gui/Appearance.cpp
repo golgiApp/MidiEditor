@@ -1229,6 +1229,19 @@ void Appearance::applyStyle() {
         applyTitleBarColor(widget);
     }
 #endif
+    if (shouldUseDarkMode()) {
+        auto palette = app->palette();
+        palette.setColor(QPalette::Base, QColor("#26313D"));
+        palette.setColor(QPalette::Text, QColor("#F4F8FF"));
+        palette.setColor(QPalette::Highlight, QColor("#3B6390"));
+        palette.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
+        app->setPalette(palette);
+        app->setStyleSheet(app->styleSheet() + QStringLiteral(
+            "QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox:editable {"
+            " color:#F4F8FF; background-color:#26313D;"
+            " selection-color:#FFFFFF; selection-background-color:#3B6390; }"
+            "QLineEdit:disabled, QAbstractSpinBox:disabled { color:#A6B3C2; }"));
+    }
 }
 
 void Appearance::applyTitleBarColor(QWidget* widget) {

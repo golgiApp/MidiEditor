@@ -677,6 +677,8 @@ QStringList KeybindsSettingsWidget::getActionOrder() const {
           << "set_file_duration" << "trim_blank_start" << "set_velocity"
           << "scale_selection" << "magnet";
     
+    order << "xiv_split_regions" << "xiv_join_regions" << "xiv_arrangement_delete";
+
     // View menu
     order << "zoom_hor_out" << "zoom_hor_in" << "zoom_ver_out" << "zoom_ver_in"
           << "zoom_std" << "reset_view";
@@ -871,7 +873,13 @@ bool KeybindsSettingsWidget::accept() {
     QStringList duplicates;
     for (auto it = shortcutToActions.constBegin(); it != shortcutToActions.constEnd(); ++it) {
         const QStringList &actionIds = it.value();
-        if (actionIds.size() > 1) {
+        // Arrangement commands have their own focus scope.
+        auto globalIds = actionIds;
+        globalIds.removeAll(QStringLiteral("xiv_split_regions"));
+        globalIds.removeAll(QStringLiteral("xiv_join_regions"));
+        globalIds.removeAll(QStringLiteral("xiv_arrangement_delete"));
+        const bool arrangementCollision = actionIds.size() - globalIds.size() > 1;
+        if (globalIds.size() > 1 || arrangementCollision) {
             QString keyStr = it.key().toString(QKeySequence::NativeText);
             QString actionsStr = actionIds.join(", ");
             duplicates.append(tr("Shortcut '%1' assigned to: %2").arg(keyStr, actionsStr));

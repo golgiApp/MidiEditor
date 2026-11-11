@@ -1,4 +1,6 @@
 #include "TimeSignatureDialog.h"
+#include <algorithm>
+#include <iterator>
 
 #include <QGridLayout>
 #include <QLabel>
@@ -37,7 +39,7 @@ TimeSignatureDialog::TimeSignatureDialog(MidiFile *file, int measure, int measur
     // Beats
     QLabel *beatsLabel = new QLabel("Number of Beats:");
     _beats = new QSpinBox();
-    _beats->setMinimum(1);
+    _beats->setRange(1, 255);
     _beats->setValue(4);
 
     layout->addWidget(beatsLabel, 1, 1, 1, 1);
@@ -46,10 +48,18 @@ TimeSignatureDialog::TimeSignatureDialog(MidiFile *file, int measure, int measur
     // beattype
     QLabel *beatTypeLabel = new QLabel("Beat Type:");
     _beatType = new QComboBox();
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 8 && (1 << i) <= 4LL * _file->ticksPerQuarter(); ++i) {
         _beatType->addItem(QString::number((int) std::pow(2, i)));
     }
-    _beatType->setCurrentIndex(2); // quarters
+    _beatType->setCurrentIndex(2);
+    const auto *meters = _file->timeSignatureEvents();
+    auto meter = meters->upperBound(measureStartTick);
+    if (meter != meters->cbegin()) {
+        if (auto *current = dynamic_cast<TimeSignatureEvent *>(std::prev(meter).value())) {
+            _beats->setValue(current->num());
+            _beatType->setCurrentIndex(std::clamp(current->denom(), 0, _beatType->count() - 1));
+        }
+    }
 
     layout->addWidget(beatTypeLabel, 2, 1, 1, 1);
     layout->addWidget(_beatType, 2, 2, 1, 1);
@@ -93,7 +103,7 @@ void TimeSignatureDialog::accept() {
     }
     int denum = _beatType->currentIndex();
     MidiTrack *generalTrack = _file->track(0);
-    _file->protocol()->startNewAction("Change Time Signature");
+    if (!generalTrack) return;
 
     QMap<int, MidiEvent *> *timeSignatureEvents = _file->timeSignatureEvents();
     bool hasTimeSignatureChangesAfter = false;
@@ -128,6 +138,7 @@ void TimeSignatureDialog::accept() {
         if ((tickFromNextChangeEvent - _startTickOfMeasure) % newEvent->ticksPerMeasure() != 0) {
             // alert
             QMessageBox::information(this, "Error", "The next Time Signature Event would not be on Downbeat.");
+            delete newEvent;
             return;
         }
         // Remove time signature in the same measure
@@ -136,12 +147,13 @@ void TimeSignatureDialog::accept() {
         }
     }
 
+    _file->protocol()->startNewAction("Change Time Signature");
+    _file->channel(18)->insertEvent(newEvent, _startTickOfMeasure);
     foreach(MidiEvent *eventToDelete, eventsToDelete) {
         _file->channel(18)->removeEvent(eventToDelete);
     }
 
-    _file->channel(18)->insertEvent(newEvent, _startTickOfMeasure);
-    hide();
+    QDialog::accept();
 
     _file->protocol()->endAction();
 }
