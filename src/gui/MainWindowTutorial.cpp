@@ -10,9 +10,9 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QDockWidget>
 #include <QFile>
 #include <QFont>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -63,12 +63,19 @@ void MainWindow::startTutorial() {
         pianoRoll->setChecked(true);
 
     auto *central = centralWidget();
-    auto *panel = new QWidget(central);
+    auto *dock = new QDockWidget(tr("Tutorial"), this);
+    dock->setAllowedAreas(Qt::TopDockWidgetArea);
+    dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
+    auto *titleBar = new QWidget(dock);
+    titleBar->setFixedHeight(0);
+    dock->setTitleBarWidget(titleBar);
+
+    auto *panel = new QWidget(dock);
     panel->setObjectName(QStringLiteral("xivTutorial"));
     panel->setStyleSheet(QStringLiteral(
-        "QWidget#xivTutorial { background:#222b37; border-top:1px solid #62788f; }"
+        "QWidget#xivTutorial { background:#222b37; border-bottom:1px solid #62788f; }"
         "QWidget#xivTutorial QLabel { color:#eef5ff; background:transparent; }"));
-    _tutorialPanel = panel;
+    _tutorialPanel = dock;
     auto *layout = new QHBoxLayout(panel);
     layout->setContentsMargins(12, 7, 12, 7);
     auto *copy = new QVBoxLayout();
@@ -90,8 +97,7 @@ void MainWindow::startTutorial() {
     layout->addWidget(hint);
     layout->addWidget(next);
     layout->addWidget(exit);
-    static_cast<QGridLayout *>(central->layout())->addWidget(panel, 3, 0);
-    panel->show();
+    dock->setWidget(panel);
 
     auto *outline = new QWidget(central);
     outline->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -152,6 +158,20 @@ void MainWindow::startTutorial() {
         {tr("Cycle playback"), tr("Drag across the thin cycle strip above the measure numbers to repeat a time range during playback."), {}}
     }};
 
+    const auto showPrompt = [heading, instruction, hint, prompts](Step step) {
+        const int index = static_cast<int>(step);
+        const auto &prompt = prompts[index];
+        heading->setText(tr("Step %1 of %2   -   %3").arg(index + 1).arg(prompts.size()).arg(prompt.title));
+        instruction->setText(hint->isChecked() ? prompt.hint : prompt.instruction);
+        hint->setVisible(!prompt.hint.isEmpty());
+    };
+    // Paint the first instruction as soon as the tutorial opens, including
+    // while the editor is still closing the startup dialog.
+    showPrompt(Step::Instrument);
+    next->hide();
+    addDockWidget(Qt::TopDockWidgetArea, dock);
+    dock->show();
+
     // This state lives with the coaching panel and is discarded when the project changes.
     auto *timer = new QTimer(panel);
     timer->setInterval(75);
@@ -182,11 +202,11 @@ void MainWindow::startTutorial() {
     });
 
     connect(timer, &QTimer::timeout, panel,
-        [this, panel, central, outline, arrangement, area, demo, flute, drums, heading,
-         instruction, hint, next, prompts, splitTick, crossesSplit, loopEnd, pasteTick, trimTick, pastedEnd,
+        [this, dock, panel, central, outline, arrangement, area, demo, flute, drums,
+         showPrompt, hint, next, splitTick, crossesSplit, loopEnd, pasteTick, trimTick, pastedEnd,
          step = Step::Instrument, shown = Step::Done, tuba = QPointer<MidiTrack>(),
          heard = false]() mutable {
-        if (_tutorialPanel != panel || file != demo) return;
+        if (_tutorialPanel != dock || file != demo) return;
         if (QApplication::activeModalWidget() || QApplication::activePopupWidget()) return;
 
         const auto &regions = arrangement->regionModel().regions();
@@ -447,11 +467,7 @@ void MainWindow::startTutorial() {
             outline->hide();
         }
 
-        const int index = static_cast<int>(step);
-        const auto &prompt = prompts[index];
-        heading->setText(tr("Step %1 of %2   -   %3").arg(index + 1).arg(prompts.size()).arg(prompt.title));
-        instruction->setText(hint->isChecked() ? prompt.hint : prompt.instruction);
-        hint->setVisible(!prompt.hint.isEmpty());
+        showPrompt(step);
         const bool nowListening = step == Step::Audition || step == Step::Listen || step == Step::ListenDrums;
         next->setVisible(nowListening || step >= Step::Tempo);
         next->setEnabled(step >= Step::Tempo || heard || playRequested);
