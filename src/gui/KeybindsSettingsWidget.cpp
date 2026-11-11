@@ -677,7 +677,8 @@ QStringList KeybindsSettingsWidget::getActionOrder() const {
           << "set_file_duration" << "trim_blank_start" << "set_velocity"
           << "scale_selection" << "magnet";
     
-    order << "xiv_split_regions" << "xiv_join_regions" << "xiv_arrangement_delete";
+    order << "xiv_split_regions" << "xiv_join_regions" << "xiv_arrangement_delete"
+          << "xiv_note_cut" << "xiv_note_legato" << "xiv_note_overlaps";
 
     // View menu
     order << "zoom_hor_out" << "zoom_hor_in" << "zoom_ver_out" << "zoom_ver_in"

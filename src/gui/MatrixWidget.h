@@ -21,6 +21,7 @@
 
 // Project includes
 #include "../region/MidiRegionRender.h"
+#include <optional>
 #include "PaintWidget.h"
 #include "Appearance.h"
 #include "../midi/MidiTrack.h"
@@ -135,7 +136,7 @@ public:
     bool allTracksEditable() const { return canEditAllTracks(); }
     void selectAllTracksVelocityNote(int id);
     bool setAllTracksVelocities(const std::map<int, int> &velocities);
-    bool allTracksCopy();
+    bool copyProjectedNotes();
     bool allTracksPaste();
     bool forceLegatoRegionSelection();
 
@@ -786,13 +787,28 @@ private:
     bool applyAllTracksEdit(RegionGesture gesture, int delta = 0, int pitch = 0);
     bool adjustAllTracksEnds(bool overlapsOnly);
     bool deleteAllTracksSelection();
-    bool handleAllTracksShortcut(QKeyEvent *event);
+    QString noteShortcut(const QKeyEvent *event) const;
+    bool handleNoteShortcut(QKeyEvent *event);
+    void runNoteCommand(const QString &command);
+    void showNoteMenu(const QPoint &position);
+    int selectedNoteId(const xiv::RenderedRegionNote &note) const;
+    bool editSelectedNotes(const QString &command, int semitones = 0);
     bool event(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
     const xiv::MidiRegion *editableRegion() const;
     QRect regionNoteRect(const xiv::RenderedRegionNote &note);
     int regionEditTick(int x);
+    int visibleGridStep(int start, int end);
+    std::pair<int, int> visibleGridCell(int tick);
+    std::pair<int, int> noteEntryBounds(const QPoint &press, const QPoint &point, int limit);
+    std::optional<std::vector<xiv::OwnedRegionNote>> regionGestureDraft(
+        const xiv::MidiRegion &region, RegionGesture gesture, const QPoint &point);
+    std::optional<xiv::MidiRegionModel> allTracksEditDraft(RegionGesture gesture, int delta, int pitch);
+    std::optional<xiv::MidiRegionModel> allTracksGestureDraft(RegionGesture gesture, const QPoint &point,
+                                                             std::set<int> &previewIds, int &addedRegion);
+    void refreshNotePreview(const QPoint &point);
+    std::vector<xiv::RenderedRegionNote> _notePreview;
     std::vector<xiv::OwnedRegionNote> regionNotesForEdit(const xiv::MidiRegion &region) const;
     bool beginRegionGesture(QMouseEvent *event);
     void updateRegionGesture(const QPoint &point);

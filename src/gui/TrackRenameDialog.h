@@ -20,6 +20,7 @@
 #define TRACKRENAMEDIALOG_H_
 
 #include <QDialog>
+#include <QStringList>
 
 class QLineEdit;
 class QToolButton;
@@ -34,9 +35,11 @@ class TrackRenameDialog : public QDialog {
     Q_OBJECT
 
 public:
-    TrackRenameDialog(const QString &currentName, int trackNumber, QSettings *settings, QWidget *parent = nullptr);
+    TrackRenameDialog(const QString &currentName, int trackNumber, QSettings *settings, QWidget *parent = nullptr,
+                      const QStringList &soundFonts = {});
 
     QString name() const;
+    int program() const { return _program; }
 
 private slots:
     void showPresets();
@@ -47,6 +50,7 @@ private:
     QToolButton *_presetsButton;
     QSettings *_settings;
     int _trackNumber;
+    int _program = -1;
 };
 
 #endif // TRACKRENAMEDIALOG_H_

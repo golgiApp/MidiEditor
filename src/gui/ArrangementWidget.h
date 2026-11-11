@@ -207,6 +207,13 @@ public:
         finishRegionEdit(before, description);
     }
 
+    void refreshRegionCreationPreview(bool controlDown) {
+        const auto global = QCursor::pos();
+        const bool hovering = isVisible() && QApplication::widgetAt(global) == this;
+        updateEmptyRegionHover(mapFromGlobal(global),
+                               controlDown && hovering ? Qt::ControlModifier : Qt::NoModifier);
+    }
+
     void zoomTimeline(bool zoomIn) {
         if (!_file) return;
         zoomTimelineAt(zoomIn, headerWidth + std::max(0, width() - headerWidth) / 2);
@@ -899,7 +906,7 @@ protected:
         if (!_emptyRegionButton.isEmpty() && canEditQuantize()) {
             p.save();
             p.setPen(QColor("#9BCDF1"));
-            p.setBrush(QColor("#345877"));
+            p.setBrush(QColor(72, 129, 167, 105));
             p.drawRoundedRect(_emptyRegionButton, 4, 4);
             const QPoint center = _emptyRegionButton.center();
             p.drawLine(center + QPoint(-4, 0), center + QPoint(4, 0));
@@ -996,7 +1003,7 @@ protected:
             const int row = (e->pos().y() - rulerHeight()) / laneHeight;
             if (row >= 0 && row < _file->numTracks()) {
                 QMenu menu(this);
-                const int createTick = emptyRegionStartTick(row, e->pos().x());
+                const int createTick = emptyRegionStartTick(e->pos().x());
                 auto *create = menu.addAction(tr("Add Empty Region Here"));
                 create->setEnabled(canEditQuantize() && emptyRegionDuration(row, createTick) > 0);
                 auto *paste = menu.addAction(withShortcut(tr("Paste Region at Playhead"), QStringLiteral("paste")));
@@ -1103,24 +1110,19 @@ protected:
         } else {
             _tempoSelected = -1;
         }
-        if (canEditQuantize() && _emptyRegionButton.contains(pos)) {
-            _emptyRegionButton = {};
-            setFocus(Qt::MouseFocusReason);
-            addEmptyRegion(_emptyRegionRow, _emptyRegionTick);
-            update();
-            e->accept();
-            return;
-        }
-        if (inSectionLane(pos)) {
-            if (canEditQuantize()) {
-                _sectionPressed = true;
-                _sectionIndex = sectionAt(pos.x());
-                _sectionAnchorTick = timelineTickAt(pos.x());
-                _sectionAnchorX = pos.x();
-                _sectionDraft = _sectionIndex >= 0 ? _sections.at(_sectionIndex) : SongSection{};
+        if (e->modifiers().testFlag(Qt::ControlModifier) && canEditQuantize() &&
+            pos.x() >= headerWidth && isLaneY(pos.y())) {
+            const int row = (pos.y() - rulerHeight()) / laneHeight;
+            if (row >= 0 && row < _file->numTracks() && !hitRegion(row, pos.x())) {
+                const int tick = emptyRegionStartTick(pos.x());
+                if (emptyRegionDuration(row, tick) > 0) {
+                    _emptyRegionButton = {};
+                    setFocus(Qt::MouseFocusReason);
+                    addEmptyRegion(row, tick);
+                    e->accept();
+                    return;
+                }
             }
-            e->accept();
-            return;
         }
         if (inCycleStrip(pos)) {
             beginCycleDrag(pos.x());
@@ -1170,8 +1172,8 @@ protected:
             }
         }
 
-        // A click on a real MIDI region selects it; a blank timeline click
-        // still seeks and a drag across empty space still pans the view.
+        // Region clicks select material. Empty lanes deselect, and dragging
+        // empty space still pans the timeline.
         if (pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight()) / laneHeight;
             const xiv::MidiRegion *r = hitRegion(row, pos.x());
@@ -1236,8 +1238,7 @@ protected:
                 return;
             }
         }
-        // Pressing the blank timeline does not seek yet: wait for release
-        // so a click seeks and a drag pans without accidentally seeking.
+        // Defer ruler seeks and lane deselection until release to distinguish panning.
         if (pos.x() >= headerWidth) {
             _timelinePressed = true;
             _dragging = false;
@@ -1257,7 +1258,7 @@ protected:
             e->accept();
             return;
         }
-        updateEmptyRegionHover(pos);
+        updateEmptyRegionHover(pos, e->modifiers());
         if (_sectionPressed) {
             updateSectionDraft(pos.x());
             e->accept();
@@ -1288,7 +1289,7 @@ protected:
             e->accept();
             return;
         }
-        if (_emptyRegionButton.contains(pos)) {
+        if (!_emptyRegionButton.isEmpty()) {
             setCursor(Qt::PointingHandCursor);
             QToolTip::hideText();
             e->accept();
@@ -1496,12 +1497,15 @@ protected:
                     _file->msOfTick(_file->arrangementEndTick()));
                 const int clampedMs = std::clamp(desiredMs, 0, endMs);
                 if (isLaneY(pos.y())) {
-                    const int row = (pos.y() - rulerHeight()) / laneHeight;
-                    if (row >= 0 && row < _file->tracks()->size()) {
-                        MidiTrack *track = _file->tracks()->at(row);
-                        setSelectedTrack(track);
-                        if (selectTrackRequested) selectTrackRequested(track);
-                    }
+                    const bool hadSelection = _selectedRegionId || !_selectedRegionIds.empty();
+                    _selectedRegionId = 0;
+                    _selectedRegionIds.clear();
+                    _trackHeaderSelected = false;
+                    setFocus(Qt::MouseFocusReason);
+                    if (hadSelection && regionViewChanged) regionViewChanged();
+                    update();
+                    e->accept();
+                    return;
                 }
                 setCursorMs(clampedMs);
                 if (seekTimeRequested) seekTimeRequested(clampedMs);
@@ -2295,8 +2299,10 @@ private:
 
     QString withShortcut(const QString &label, const QString &id) const {
         const auto bindings = commandShortcuts ? commandShortcuts(id) : QList<QKeySequence>{};
-        return bindings.isEmpty() ? label : label + QLatin1Char('\t') +
-            bindings.first().toString(QKeySequence::NativeText);
+        QStringList display;
+        for (const auto &binding : bindings)
+            if (!binding.isEmpty()) display.append(binding.toString(QKeySequence::NativeText));
+        return display.isEmpty() ? label : label + QLatin1Char('\t') + display.join(QStringLiteral(" / "));
     }
 
     bool isJoinShortcut(const QKeyEvent *e) const {
@@ -2668,8 +2674,6 @@ private:
     }
 
     QRect _emptyRegionButton;
-    int _emptyRegionRow = -1;
-    int _emptyRegionTick = 0;
 
     void leaveEvent(QEvent *event) override {
         _emptyRegionButton = {};
@@ -2677,58 +2681,44 @@ private:
         QWidget::leaveEvent(event);
     }
 
-    void updateEmptyRegionHover(const QPoint &pos) {
-        if (canEditQuantize() && !_timelinePressed && !_regionPressed &&
-            _cycleDrag == CycleDrag::None && pos.x() >= headerWidth &&
-            width() - headerWidth >= 20 && isLaneY(pos.y())) {
+    void updateEmptyRegionHover(const QPoint &pos, Qt::KeyboardModifiers modifiers) {
+        QRect preview;
+        if (modifiers.testFlag(Qt::ControlModifier) && canEditQuantize() &&
+            !_timelinePressed && !_regionPressed && _cycleDrag == CycleDrag::None &&
+            rect().contains(pos) && pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight()) / laneHeight;
-            if (row >= 0 && row < _file->numTracks() && !hitRegion(row, pos.x()) &&
-                height() - (_rulerTop + rulerHeight()) >= 19) {
-                if (_emptyRegionButton.contains(pos)) return;
-                const int tick = emptyRegionStartTick(row, pos.x());
-                if (emptyRegionDuration(row, tick) > 0) {
-                    _emptyRegionRow = row;
-                    _emptyRegionTick = tick;
-                    _emptyRegionButton = QRect(std::clamp(pos.x() - 9, headerWidth, width() - 19),
-                        std::clamp(pos.y() - 9, _rulerTop + rulerHeight(), height() - 19), 19, 19);
-                    update();
-                    return;
+            if (row < _file->numTracks() && !hitRegion(row, pos.x())) {
+                const int tick = emptyRegionStartTick(pos.x());
+                const int duration = emptyRegionDuration(row, tick);
+                if (duration > 0) {
+                    const int left = std::max(headerWidth, xForMs(_file->msOfTick(tick)));
+                    const int right = std::min(width(), xForMs(_file->msOfTick(tick + duration)));
+                    preview = QRect(left, rulerHeight() + row * laneHeight + 6,
+                                    std::max(1, right - left), laneHeight - 12);
                 }
             }
         }
-        if (_emptyRegionButton.isEmpty()) return;
-        _emptyRegionButton = {};
-        update();
+        if (_emptyRegionButton != preview) {
+            _emptyRegionButton = preview;
+            update();
+        }
     }
 
-    int emptyRegionStartTick(int track, int x) const {
-        const int raw = timelineTickAt(x);
-        const int snapped = snapTick(raw);
-        // Keep the start in the hovered gap even when it is shorter than the grid.
-        for (const auto &region : _regions.regions()) {
-            if (region.trackIndex == track &&
-                std::min(raw, snapped) < region.endTick() &&
-                std::max(raw, snapped) >= region.startTick)
-                return raw;
-        }
-        return snapped;
+    int emptyRegionStartTick(int x) const {
+        int start = 0, end = 0;
+        _file->measure(timelineTickAt(x), &start, &end);
+        return start;
     }
 
     int emptyRegionDuration(int track, int tick) const {
-        int64_t end = tick;
         int boundary = tick;
         for (int i = 0; i < 4; ++i) {
             int measureStart = 0, measureEnd = 0;
             _file->measure(boundary, &measureStart, &measureEnd);
             if (measureEnd <= boundary || measureEnd <= measureStart) break;
-            end += static_cast<int64_t>(measureEnd) - measureStart;
-            if (end >= std::numeric_limits<int>::max()) {
-                end = std::numeric_limits<int>::max();
-                break;
-            }
             boundary = measureEnd;
         }
-        return xiv::emptyRegionGapDuration(_regions, track, tick, static_cast<int>(end));
+        return xiv::emptyRegionGapDuration(_regions, track, tick, boundary);
     }
 
     void addEmptyRegion(int track, int tick) {

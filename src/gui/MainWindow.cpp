@@ -168,6 +168,32 @@
 #include "../converter/GuitarPro/GpImporter.h"
 #include "../midi/ChordDetector.h"
 
+static QStringList enabledSoundFontPaths() {
+    QStringList paths;
+#ifdef FLUIDSYNTH_SUPPORT
+    const auto collection = FluidSynthEngine::instance()->soundFontCollection();
+    // The most recently loaded SoundFont has priority for a MIDI program.
+    for (auto it = collection.crbegin(); it != collection.crend(); ++it)
+        if (it->second && QFileInfo::exists(it->first)) paths.append(it->first);
+#endif
+    const QString bundled = QCoreApplication::applicationDirPath()
+        + QStringLiteral("/soundfonts/FFXIV Standard.sf2");
+    if (paths.isEmpty() && QFileInfo::exists(bundled)) paths.append(bundled);
+    return paths;
+}
+
+static void assignTrackProgram(MidiFile *file, MidiTrack *track, int channel, int program) {
+    const auto events = file->channelEvents(channel)->values(0);
+    for (auto *event : events) {
+        auto *change = dynamic_cast<ProgChangeEvent *>(event);
+        if (change && change->track() == track) {
+            change->setProgram(program);
+            return;
+        }
+    }
+    file->channel(channel)->insertEvent(new ProgChangeEvent(channel, program, track), 0);
+}
+
 MainWindow::MainWindow(QString initFile)
     : QMainWindow()
       , _initFile(initFile) {
@@ -734,14 +760,7 @@ MainWindow::MainWindow(QString initFile)
     };
     _arrangementWidget->instrumentMenuRequested = [this](MidiTrack *track, const QPoint &globalPos) {
         if (!file || !track || !file->tracks()->contains(track)) return;
-        QStringList paths;
-#ifdef FLUIDSYNTH_SUPPORT
-        for (const auto &item : FluidSynthEngine::instance()->soundFontCollection())
-            if (item.second && QFileInfo::exists(item.first)) paths.append(item.first);
-#endif
-        const QString bundled = QCoreApplication::applicationDirPath()
-            + QStringLiteral("/soundfonts/FFXIV Standard.sf2");
-        if (paths.isEmpty() && QFileInfo::exists(bundled)) paths.append(bundled);
+        const auto paths = enabledSoundFontPaths();
         QMenu menu(this);
         int activeChannel = track->assignedChannel();
         if (activeChannel < 0 || activeChannel > 15) {
@@ -758,6 +777,8 @@ MainWindow::MainWindow(QString initFile)
                 break;
             }
         }
+        QSet<int> seenPrograms;
+        const int currentProgram = file->channel(activeChannel)->progAtTick(file->cursorTick());
         for (const QString &path : paths) {
             const auto presets = xivReadSoundFontPresets(path);
             if (presets.isEmpty()) continue;
@@ -765,23 +786,16 @@ MainWindow::MainWindow(QString initFile)
             for (const auto &preset : presets) {
                 // Bank 0 is preserved by a regular program-change MIDI event.
                 // Additional SF2 banks need bank-select events and are omitted here.
-                if (preset.bank != 0) continue;
+                if (preset.bank != 0 || seenPrograms.contains(preset.program)) continue;
+                seenPrograms.insert(preset.program);
                 QAction *action = fontMenu->addAction(preset.name);
+                action->setCheckable(true);
+                action->setChecked(preset.program == currentProgram);
                 QObject::connect(action, &QAction::triggered, this,
                     [this, track, activeChannel, preset]() {
                         if (!file || !file->tracks()->contains(track)) return;
                         file->protocol()->startNewAction(tr("Change Track Instrument"));
-                        ProgChangeEvent *atZero = nullptr;
-                        const auto *events = file->channel(activeChannel)->eventMap();
-                        for (auto it = events->cbegin(); it != events->cend(); ++it) {
-                            auto *pc = dynamic_cast<ProgChangeEvent *>(it.value());
-                            if (pc && pc->midiTime() == 0 && pc->track() == track) {
-                                atZero = pc; break;
-                            }
-                        }
-                        if (atZero) atZero->setProgram(preset.program);
-                        else file->channel(activeChannel)->insertEvent(
-                            new ProgChangeEvent(activeChannel, preset.program, track), 0);
+                        assignTrackProgram(file, track, activeChannel, preset.program);
                         track->setName(preset.name);
                         file->protocol()->endAction();
                         MidiOutput::sendProgram(activeChannel, preset.program);
@@ -3441,6 +3455,9 @@ void MainWindow::keyReleaseEvent(QKeyEvent *event) {
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
     if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
+        const auto *key = static_cast<QKeyEvent *>(event);
+        if (_arrangementWidget && key->key() == Qt::Key_Control && !key->isAutoRepeat())
+            _arrangementWidget->refreshRegionCreationPreview(event->type() == QEvent::KeyPress);
         // If piano emulation is active, we check if we should intercept the key
         if (matrixWidget() && matrixWidget()->isPianoEmulationEnabled()) {
             // Never intercept if a text input has focus
@@ -3539,26 +3556,32 @@ static bool channelUsedByAnotherTrack(MidiFile *file, MidiTrack *track, int chan
 
 void MainWindow::addTrack() {
     if (file) {
-        TrackRenameDialog *d = new TrackRenameDialog(tr("New Track"), file->numTracks(), _settings, this);
-        if (d->exec() == QDialog::Accepted && !d->name().isEmpty()) {
+        TrackRenameDialog dialog(tr("New Track"), file->numTracks(), _settings, this,
+                                 enabledSoundFontPaths());
+        dialog.setWindowTitle(tr("Add Track"));
+        if (dialog.exec() == QDialog::Accepted && !dialog.name().trimmed().isEmpty()) {
             file->protocol()->startNewAction("Add Track");
             file->addTrack();
             auto *track = file->tracks()->last();
             int available = -1;
             for (int ch = 0; ch < 16; ++ch) {
                 if (channelUsedByAnotherTrack(file, track, ch)) continue;
-                if (ch == 9) { available = ch; continue; }
+                if (ch == 9) { if (dialog.program() < 0) available = ch; continue; }
                 available = ch;
                 break;
             }
             track->assignChannel(available);
-            track->setName(d->name());
+            track->setName(dialog.name().trimmed());
+            if (available >= 0 && dialog.program() >= 0)
+                assignTrackProgram(file, track, available, dialog.program());
             file->protocol()->endAction();
 
             updateTrackMenu();
             editTrackAndChannel(track);
             if (available < 0)
-                statusBar()->showMessage(tr("All MIDI channels are in use. Free a channel before routing this track."), 5000);
+                statusBar()->showMessage(dialog.program() >= 0
+                    ? tr("No melodic MIDI channel is free. Free a channel to apply this track’s instrument.")
+                    : tr("All MIDI channels are in use. Free a channel before routing this track."), 5000);
         }
     }
 }
@@ -4901,7 +4924,7 @@ void MainWindow::transposeSelection(int semitones) {
 
 void MainWindow::copy() {
     if (mw_matrixWidget->allTracksEditing()) {
-        mw_matrixWidget->allTracksCopy();
+        mw_matrixWidget->copyProjectedNotes();
         return;
     }
     EventTool::copyAction();
@@ -6790,6 +6813,10 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     arrangementBinding(QStringLiteral("xiv_join_regions"), tr("Join Selected Regions"), QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key_J)));
     arrangementBinding(QStringLiteral("xiv_arrangement_delete"), tr("Delete in Arrangement"),
                        QKeySequence(Qt::Key_Backspace));
+
+    arrangementBinding(QStringLiteral("xiv_note_cut"), tr("Cut Selected Notes"), QKeySequence(QKeySequence::Cut));
+    arrangementBinding(QStringLiteral("xiv_note_legato"), tr("Force Legato"), QKeySequence());
+    arrangementBinding(QStringLiteral("xiv_note_overlaps"), tr("Remove Overlaps (8 Ticks)"), QKeySequence());
 
     // Apply any stored custom shortcuts from settings after defining defaults
     applyStoredShortcuts();

@@ -20,6 +20,9 @@
 #include "Appearance.h"
 #include "GameSupportSettingsWidget.h"
 #include "../support/FFXIVChannelFixer.h"
+#include "../support/SoundFontPresetCatalog.h"
+#include <QFileInfo>
+#include <QSet>
 #include "../midi/InstrumentDefinitions.h"
 
 #include <QVBoxLayout>
@@ -32,7 +35,8 @@
 #include <QAction>
 #include <QSettings>
 
-TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber, QSettings *settings, QWidget *parent)
+TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber, QSettings *settings, QWidget *parent,
+                                     const QStringList &soundFonts)
     : QDialog(parent), _settings(settings), _trackNumber(trackNumber) {
     
     setWindowTitle(tr("Set Track Name"));
@@ -47,39 +51,59 @@ TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber
     topLayout->addWidget(label);
     topLayout->addStretch();
 
-    if (GameSupportSettingsWidget::isFFXIVRenamePresetsEnabled(_settings)) {
+    if (!soundFonts.isEmpty() || GameSupportSettingsWidget::isFFXIVRenamePresetsEnabled(_settings)) {
         _presetsButton = new QToolButton(this);
         _presetsButton->setIcon(QIcon(":/run_environment/graphics/channelwidget/instrument.png"));
         _presetsButton->setIconSize(QSize(20, 20));
         _presetsButton->setFixedSize(QSize(30, 30));
-        _presetsButton->setToolTip(tr("FFXIV Instrument Presets"));
+        _presetsButton->setToolTip(soundFonts.isEmpty() ? tr("FFXIV Instrument Presets")
+                                                         : tr("SoundFont Presets"));
         _presetsButton->setPopupMode(QToolButton::InstantPopup);
         
         QMenu *menu = new QMenu(_presetsButton);
         menu->setStyleSheet("QMenu { menu-scrollable: 1; }"); // Ensure scrolling if too many items
 
-        QList<FFXIVChannelFixer::InstrumentGroup> groups = FFXIVChannelFixer::ffxivInstrumentGroups();
-        InstrumentDefinitions *defs = InstrumentDefinitions::instance();
+        if (!soundFonts.isEmpty()) {
+            QSet<int> seen;
+            for (const auto &path : soundFonts) {
+                auto *font = menu->addMenu(QFileInfo(path).completeBaseName());
+                for (const auto &preset : xivReadSoundFontPresets(path)) {
+                    if (preset.bank != 0 || seen.contains(preset.program)) continue;
+                    seen.insert(preset.program);
+                    auto *action = font->addAction(preset.name);
+                    connect(action, &QAction::triggered, this, [this, preset] {
+                        _program = preset.program;
+                        _nameEdit->setText(preset.name);
+                        _nameEdit->setFocus();
+                    });
+                }
+                if (font->isEmpty()) font->menuAction()->setVisible(false);
+            }
+        } else {
+            QList<FFXIVChannelFixer::InstrumentGroup> groups = FFXIVChannelFixer::ffxivInstrumentGroups();
+            InstrumentDefinitions *defs = InstrumentDefinitions::instance();
 
-        for (const auto &group : groups) {
-            QMenu *groupMenu = menu->addMenu(group.name);
-            for (int program : group.programs) {
-                QString name = defs->instrumentName(program);
-                name.remove(" ");
-                if (group.name == tr("Guitars")) {
-                    name.remove(":");
+            for (const auto &group : groups) {
+                QMenu *groupMenu = menu->addMenu(group.name);
+                for (int program : group.programs) {
+                    QString name = defs->instrumentName(program);
+                    name.remove(" ");
+                    if (group.name == tr("Guitars")) {
+                        name.remove(":");
+                    }
+
+                    QAction *action = groupMenu->addAction(name);
+                    action->setData(name);
+                    action->setProperty("program", program);
+                    connect(action, SIGNAL(triggered()), this, SLOT(setPresetName()));
                 }
 
-                QAction *action = groupMenu->addAction(name);
-                action->setData(name);
-                connect(action, SIGNAL(triggered()), this, SLOT(setPresetName()));
-            }
-
-            if (group.name == tr("Guitars")) {
-                QString special = "Program:ElectricGuitar";
-                QAction *action = groupMenu->addAction(special);
-                action->setData(special);
-                connect(action, SIGNAL(triggered()), this, SLOT(setPresetName()));
+                if (group.name == tr("Guitars")) {
+                    QString special = "Program:ElectricGuitar";
+                    QAction *action = groupMenu->addAction(special);
+                    action->setData(special);
+                    connect(action, SIGNAL(triggered()), this, SLOT(setPresetName()));
+                }
             }
         }
 
@@ -127,6 +151,8 @@ void TrackRenameDialog::showPresets() {
 void TrackRenameDialog::setPresetName() {
     QAction *action = qobject_cast<QAction *>(sender());
     if (action) {
+        if (action->property("program").isValid()) _program = action->property("program").toInt();
+        else _program = -1;
         _nameEdit->setText(action->data().toString());
         _nameEdit->setFocus();
     }
