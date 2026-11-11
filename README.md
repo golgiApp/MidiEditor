@@ -12,7 +12,7 @@ XIV MIDI Studio brings Meowchestra’s MidiEditor quality-of-life features into 
 - **Playhead time.** The transport displays elapsed time in minutes, seconds, and hundredths alongside the bar and beat.
 
 - **Global Tracks.** Use the disclosure above the track headers to show or hide Arrangement, Time Signature, and Tempo. Use **+** to add a named section, a signature at the start of the current bar, or a tempo point at the exact playhead tick.
-- **Song sections.** Name and rearrange sections of your song in the Arrangement lane.
+- **Song sections.** Name sections of your song in the Arrangement lane.
 - **Edit the tempo line.** Click to add a point, drag it to change BPM or timing, double-click it to type a BPM, or select it and press Backspace to delete it. Drag the corner of a step to create a linear ramp and double-click its handle to restore the step. The original meter and tempo tools remain available.
 - **Track editing.** Click a track header to select its regions. Backspace removes the regions and a second press removes the empty track. **Copy Track** duplicates the track and its regions on an unused MIDI channel. MIDI files retain their original track order and empty tracks.
 - **Shortcuts and dialog contrast.** Menus and tooltips show active bindings, and the shared dark theme improves text input and selection contrast.
