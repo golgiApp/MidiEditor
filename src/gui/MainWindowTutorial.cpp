@@ -18,6 +18,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <array>
@@ -161,7 +162,7 @@ void MainWindow::startTutorial() {
     const auto *fluteEvents = demo->channelEvents(flute->assignedChannel());
     const bool crossesSplit = std::any_of(fluteEvents->cbegin(), fluteEvents->cend(),
         [flute, splitTick](MidiEvent *event) {
-            const auto *note = dynamic_cast<NoteOnEvent *>(event);
+            auto *note = dynamic_cast<NoteOnEvent *>(event);
             return note && note->track() == flute && note->velocity() > 0 && note->offEvent() &&
                    note->midiTime() < splitTick && note->offEvent()->midiTime() > splitTick;
         });
