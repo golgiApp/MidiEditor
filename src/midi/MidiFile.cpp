@@ -20,6 +20,7 @@
 
 #include <QDataStream>
 #include <QFile>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QSet>
 
@@ -34,6 +35,7 @@
 #include "../MidiEvent/TempoChangeEvent.h"
 #include "../MidiEvent/TextEvent.h"
 #include "../MidiEvent/TimeSignatureEvent.h"
+#include "../MidiEvent/UnknownEvent.h"
 #include "../protocol/Protocol.h"
 #include "MidiChannel.h"
 #include "MidiTrack.h"
@@ -60,6 +62,10 @@ static QList<MidiEvent *> getSortedEvents(QMultiMap<int, MidiEvent *> *map) {
     }
     return events;
 }
+
+// Mark rendered MIDI so a pre-existing sidecar at the same path cannot
+// reapply old region edits to notes that have already been rendered.
+static const QByteArray standaloneMidiTag("XIVMS:StandaloneMIDI:1");
 
 int MidiFile::defaultTimePerQuarter = 192;
 
@@ -404,6 +410,13 @@ bool MidiFile::readTrack(QDataStream *content, int num, QStringList *log) {
         }
         if (!event) {
             return false;
+        }
+
+        if (auto *meta = dynamic_cast<UnknownEvent *>(event);
+            meta && meta->type() == 0x7f && meta->data() == standaloneMidiTag) {
+            _standaloneMidi = true;
+            delete meta;
+            continue;
         }
 
         event->setFile(this);
@@ -1677,6 +1690,7 @@ void MidiFile::setPauseTick(int tick) {
 }
 
 bool MidiFile::save(QString path) {
+    if (_standaloneMidi) return saveStandaloneMidi(path);
     QFile *f = new QFile(path);
 
     if (!f->open(QIODevice::WriteOnly)) {
@@ -1794,6 +1808,17 @@ bool MidiFile::save(QString path) {
 bool MidiFile::saveArrangedMidi(QString path) {
     if (path.isEmpty() || (QFileInfo(path).absoluteFilePath() ==
                            QFileInfo(_path).absoluteFilePath())) return false;
+    return writeArrangedMidi(path);
+}
+
+bool MidiFile::saveStandaloneMidi(const QString &path) {
+    if (!writeArrangedMidi(path)) return false;
+    _standaloneMidi = true;
+    _saved = true;
+    return true;
+}
+
+bool MidiFile::writeArrangedMidi(const QString &path) {
     QMultiMap<int, MidiEvent *> allEvents;
     QList<MidiEvent *> owned;
     buildRenderedNoteEvents(allEvents, owned);
@@ -1814,8 +1839,19 @@ bool MidiFile::saveArrangedMidi(QString path) {
             if (!replaced) allEvents.insert(it.key(), event);
         }
     }
-    QFile file(path);
+    QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) { qDeleteAll(owned); return false; }
+    auto ordered = allEvents.values();
+    const auto noteOrder = [](MidiEvent *event) {
+        if (dynamic_cast<OffEvent *>(event)) return 1;
+        if (auto *on = dynamic_cast<NoteOnEvent *>(event))
+            return on->velocity() == 0 ? 1 : 2;
+        return 0;
+    };
+    std::stable_sort(ordered.begin(), ordered.end(), [&](MidiEvent *a, MidiEvent *b) {
+        if (a->midiTime() != b->midiTime()) return a->midiTime() < b->midiTime();
+        return noteOrder(a) < noteOrder(b);
+    });
     QByteArray data;
     data.append("MThd", 4);
     data.append(char(0)); data.append(char(0)); data.append(char(0)); data.append(char(6));
@@ -1834,15 +1870,19 @@ bool MidiFile::saveArrangedMidi(QString path) {
             trackBytes.append(writeDeltaTime(0));
             trackBytes.append(name->save());
         }
+        if (t == 0) {
+            UnknownEvent standalone(16, 0x7f, standaloneMidiTag, track);
+            trackBytes.append(writeDeltaTime(0));
+            trackBytes.append(standalone.save());
+        }
         int last = 0;
-        for (auto it = allEvents.cbegin(); it != allEvents.cend(); ++it) {
-            MidiEvent *event = it.value();
+        for (MidiEvent *event : ordered) {
             if (auto *text = dynamic_cast<TextEvent *>(event);
                 text && text->type() == TextEvent::TRACKNAME) continue;
             const bool meta = event->channel() >= 16;
             if ((meta && t != 0) || (!meta && track != event->track()))
                 continue;
-            const int tick = it.key();
+            const int tick = event->midiTime();
             if (tick < last) continue;
             trackBytes.append(writeDeltaTime(tick - last));
             trackBytes.append(event->save());
@@ -1856,10 +1896,8 @@ bool MidiFile::saveArrangedMidi(QString path) {
         data.append(char((n >> 8) & 255)); data.append(char(n & 255));
         data.append(trackBytes);
     }
-    const bool ok = file.write(data) == data.size();
-    file.close();
+    const bool ok = file.write(data) == data.size() && file.commit();
     qDeleteAll(owned);
-    if (!ok) QFile::remove(path);
     return ok;
 }
 

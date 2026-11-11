@@ -530,6 +530,7 @@ public:
     // or overwrite the MIDI events as part of region splitting.
     bool saveRegionLayout(const QString &midiPath = QString()) {
         if (!_regionsReady || !_file) return false;
+        if (_file->isStandaloneMidi()) return true;
         // Track creation/removal must reach the MIDI and its sidecar together.
         if (_regionTrackEditPendingSave && midiPath.isEmpty()) return true;
         const QString path = midiPath.isEmpty() ? _file->path() : midiPath;
@@ -2953,7 +2954,7 @@ private:
         finishRegionEdit(before, tr("Delete Region"));
     }
     void loadRegionLayout() {
-        if (!_file || _file->path().trimmed().isEmpty()) return;
+        if (!_file || _file->isStandaloneMidi() || _file->path().trimmed().isEmpty()) return;
         QFile input(_file->path() + QStringLiteral(".xivms-regions.json"));
         if (!input.exists() || !input.open(QIODevice::ReadOnly)) return;
         QJsonParseError error;

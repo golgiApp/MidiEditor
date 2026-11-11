@@ -2358,12 +2358,8 @@ void MainWindow::saveas() {
     if (!file)
         return;
 
-    QString oldPath = file->path();
-    QFile *f = new QFile(oldPath);
-    QString dir = startDirectory;
-    if (f->exists()) {
-        QFileInfo(*f).dir().path();
-    }
+    const QFileInfo oldFile(file->path());
+    const QString dir = oldFile.isFile() ? oldFile.absolutePath() : startDirectory;
     QString newPath = QFileDialog::getSaveFileName(this, tr("Save As..."), dir);
 
     if (newPath == "") {
@@ -2375,7 +2371,7 @@ void MainWindow::saveas() {
         newPath.append(".mid");
     }
 
-    if (file->save(newPath)) {
+    if (file->saveStandaloneMidi(newPath)) {
         bool printMuteWarning = false;
 
         for (int i = 0; i < 16; i++) {
@@ -2394,7 +2390,6 @@ void MainWindow::saveas() {
             QMessageBox::information(this, tr("Channels/Tracks Mute"), tr("One or more channels/tracks are not audible. They will be audible in the saved file."), QMessageBox::Ok);
         }
 
-        if (_arrangementWidget) _arrangementWidget->saveRegionLayout(newPath);
         file->setPath(newPath);
         setWindowTitle(QApplication::applicationName() + " - " + file->path() + "[*]");
         updateRecentPathsList();

@@ -115,9 +115,9 @@ public:
      */
     bool saveForExport(QString path, int startTick = 0, int endTick = -1);
 
-    // The .mid Save command retains the original note events and edits are
-    // persisted in the .xivms-regions.json sidecar. This explicit export bakes
-    // region placements into a standard MIDI file without changing the source.
+    // Save As writes the audible arrangement to one standard MIDI file.
+    bool saveStandaloneMidi(const QString &path);
+    bool isStandaloneMidi() const { return _standaloneMidi; }
     bool saveArrangedMidi(QString path);
     void setRegionLayout(const xiv::MidiRegionModel &layout);
     bool regionsChangeTiming() const;
@@ -552,6 +552,9 @@ signals:
     void trackChanged();
 
 private:
+    bool writeArrangedMidi(const QString &path);
+    bool _standaloneMidi = false;
+
     // === File Reading Methods ===
 
     /**
