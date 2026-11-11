@@ -38,6 +38,7 @@
 #include <QMenu>
 #include <QDialog>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QRadioButton>
 #include <QButtonGroup>
 #include <QVBoxLayout>
@@ -67,6 +68,12 @@
 #include "../protocol/ProtocolItem.h"
 
 class ArrangementWidget final : public QWidget {
+    struct SongSection {
+        QString name;
+        int start = 0;
+        int end = 0;
+    };
+
     enum class RegionDragMode { Move, Duplicate, TrimLeft, TrimRight, Loop };
 public:
     explicit ArrangementWidget(QWidget *parent = nullptr) : QWidget(parent) {
@@ -146,8 +153,10 @@ public:
         if (!_file) return 0;
         const int visibleMs = visibleTimeMs();
         // Include an extra second of visual room after the last MIDI event.
-        const auto songEnd = static_cast<long long>(std::max(
-            _file->maxTime(), _file->msOfTick(_file->arrangementEndTick()))) + 12000;
+        int endTick = _file->arrangementEndTick();
+        for (const auto &section : _sections) endTick = std::max(endTick, section.end);
+        const auto songEnd = static_cast<long long>(
+            std::max(_file->maxTime(), _file->msOfTick(endTick))) + 12000;
         return static_cast<int>(std::clamp(songEnd - visibleMs,
                      0LL, static_cast<long long>(std::numeric_limits<int>::max())));
     }
@@ -160,7 +169,9 @@ public:
         if (scrollRangeChanged) scrollRangeChanged(maxMs, visibleTimeMs());
     }
     static constexpr int headerWidth = 326;
-    static constexpr int rulerHeight = 34;
+    static constexpr int measureRulerHeight = 34;
+    static constexpr int sectionLaneHeight = 24;
+    static constexpr int rulerHeight = measureRulerHeight + sectionLaneHeight;
     void replaceRegionNotes(int id, std::vector<xiv::OwnedRegionNote> notes,
                             const QString &description) {
         const auto *region = _regions.find(id);
@@ -208,6 +219,8 @@ public:
         _emptyRegionButton = {};
         _preview.clear();
         _regions.clear();
+        _sections.clear();
+        _sectionPressed = false;
         _regionsReady = false;
         _regionTracks.clear();
         _lastSavedRegionTracks = file ? *file->tracks() : QList<MidiTrack *>{};
@@ -398,6 +411,10 @@ public:
         }
         root.insert(QStringLiteral("version"), version);
         root.insert(QStringLiteral("regions"), items);
+        QJsonArray sections;
+        for (const auto &section : _sections)
+            sections.append(QJsonArray{section.name, section.start, section.end});
+        root.insert(QStringLiteral("sections"), sections);
         QJsonArray managed;
         for (int track : _regions.managedTracks()) managed.append(track);
         root.insert(QStringLiteral("managedTracks"), managed);
@@ -441,7 +458,7 @@ protected:
             if (!e->isAutoRepeat()) {
                 if (e->matches(QKeySequence::Copy)) copyRegion(_selectedRegionId);
                 else if (_file && _selected)
-                    pasteRegion(_file->tracks()->indexOf(_selected), snapTick(_file->cursorTick()));
+                    pasteRegionAtPlayhead(_file->tracks()->indexOf(_selected));
             }
             e->accept();
             return;
@@ -605,8 +622,10 @@ protected:
                            QStringLiteral("Region %1").arg(region.id));
                 // Dedicated upper-right looping handle, distinct from
                 // draggable left/right trim edges.
-                if (regionRect.width() >= 47) {
-                    QRect loopIcon(regionRect.right() - 32, regionRect.top() + 3, 22, 22);
+                const QRect loopIcon = loopHandleRect(
+                    xForMs(_file->msOfTick(region.startTick)),
+                    xForMs(_file->msOfTick(region.endTick())), y + 6);
+                if (!loopIcon.isEmpty()) {
                     p.fillRect(loopIcon, QColor(25, 34, 43, 170));
                     QFont loopFont = p.font();
                     loopFont.setPixelSize(17);
@@ -614,12 +633,12 @@ protected:
                     p.setFont(loopFont);
                     p.setPen(QColor("#E8B66D"));
                     p.drawText(loopIcon, Qt::AlignCenter, QString(QChar(ushort(0x21BB))));
-                    if (region.loopLengthTicks > 0) {
-                        p.setPen(QColor("#FFE0A4"));
-                        p.drawText(regionRect.adjusted(6, 20, -5, -3),
-                                   Qt::AlignLeft | Qt::AlignTop,
-                                   tr("Loop"));
-                    }
+                }
+                if (regionRect.width() >= 47 && region.loopLengthTicks > 0) {
+                    p.setPen(QColor("#FFE0A4"));
+                    p.drawText(regionRect.adjusted(6, 20, -5, -3),
+                               Qt::AlignLeft | Qt::AlignTop,
+                               tr("Loop"));
                 }
             }
 
@@ -798,6 +817,11 @@ protected:
     }
 
     void contextMenuEvent(QContextMenuEvent *e) override {
+        if (inSectionLane(e->pos())) {
+            showSectionMenu(e);
+            e->accept();
+            return;
+        }
         if (_file && e->pos().x() >= headerWidth && isLaneY(e->pos().y())) {
             const QPoint pos = e->pos();
             const int row = (pos.y() - rulerHeight) / laneHeight;
@@ -814,7 +838,7 @@ protected:
                 if (regionViewChanged) regionViewChanged();
                 QMenu menu(this);
                 auto *copy = menu.addAction(tr("Copy Region"));
-                auto *paste = menu.addAction(tr("Paste Region Here"));
+                auto *paste = menu.addAction(tr("Paste Region at Playhead"));
                 paste->setEnabled(_regionClipboard.duration > 0 && canEditQuantize());
                 menu.addSeparator();
                 QAction *join = menu.addAction(tr("Join Selected Regions Here") + QLatin1Char('\t') +
@@ -839,7 +863,7 @@ protected:
                 deleteRegionAction->setEnabled(!MidiPlayer::isPlaying());
                 QAction *chosen = menu.exec(e->globalPos());
                 if (chosen == copy) copyRegion(id);
-                else if (chosen == paste) pasteRegion(row, tick);
+                else if (chosen == paste) pasteRegionAtPlayhead(row);
                 else if (chosen == join) joinSelectedRegions(id);
                 else if (chosen == splitHere) splitRegion(id, tick);
                 else if (chosen == splitAtCursor) splitSelectedAtPlayhead();
@@ -852,16 +876,15 @@ protected:
         if (_file && e->pos().x() >= headerWidth && isLaneY(e->pos().y())) {
             const int row = (e->pos().y() - rulerHeight) / laneHeight;
             if (row >= 0 && row < _file->numTracks()) {
-                const int tick = snapTick(timelineTickAt(e->pos().x()));
                 QMenu menu(this);
                 const int createTick = emptyRegionStartTick(row, e->pos().x());
                 auto *create = menu.addAction(tr("Add Empty Region Here"));
                 create->setEnabled(canEditQuantize() && emptyRegionDuration(row, createTick) > 0);
-                auto *paste = menu.addAction(tr("Paste Region Here"));
+                auto *paste = menu.addAction(tr("Paste Region at Playhead"));
                 paste->setEnabled(_regionClipboard.duration > 0 && canEditQuantize());
                 QAction *chosen = menu.exec(e->globalPos());
                 if (chosen == create) addEmptyRegion(row, createTick);
-                else if (chosen == paste) pasteRegion(row, tick);
+                else if (chosen == paste) pasteRegionAtPlayhead(row);
                 e->accept();
                 return;
             }
@@ -906,6 +929,17 @@ protected:
             setFocus(Qt::MouseFocusReason);
             addEmptyRegion(_emptyRegionRow, _emptyRegionTick);
             update();
+            e->accept();
+            return;
+        }
+        if (inSectionLane(pos)) {
+            if (canEditQuantize()) {
+                _sectionPressed = true;
+                _sectionIndex = sectionAt(pos.x());
+                _sectionAnchorTick = timelineTickAt(pos.x());
+                _sectionAnchorX = pos.x();
+                _sectionDraft = _sectionIndex >= 0 ? _sections.at(_sectionIndex) : SongSection{};
+            }
             e->accept();
             return;
         }
@@ -995,9 +1029,7 @@ protected:
                     const bool rightHandle = right < width() &&
                         std::abs(pos.x() - right) <= 8;
                     const int regionTop = rulerHeight + row * laneHeight + 6;
-                    const bool loopHandle = right - left >= 47 &&
-                        pos.x() >= right - 34 && pos.x() < right - 8 &&
-                        pos.y() >= regionTop && pos.y() < regionTop + 29;
+                    const bool loopHandle = loopHandleRect(left, right, regionTop).contains(pos);
                     _dragMode = loopHandle ? RegionDragMode::Loop :
                         (e->modifiers() & Qt::ControlModifier) ? RegionDragMode::Duplicate :
                         leftHandle ? RegionDragMode::TrimLeft :
@@ -1034,6 +1066,20 @@ protected:
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
         updateEmptyRegionHover(pos);
+        if (_sectionPressed) {
+            updateSectionDraft(pos.x());
+            e->accept();
+            return;
+        }
+        if (inSectionLane(pos) && !_timelinePressed && !_regionPressed &&
+            _cycleDrag == CycleDrag::None) {
+            setCursor(sectionAt(pos.x()) >= 0 ? Qt::OpenHandCursor : Qt::CrossCursor);
+            QToolTip::showText(e->globalPosition().toPoint(),
+                tr("Drag empty space to name a section. Drag a section to move its regions. Right-click to rename or delete."),
+                this);
+            e->accept();
+            return;
+        }
         if (_emptyRegionButton.contains(pos)) {
             setCursor(Qt::PointingHandCursor);
             QToolTip::hideText();
@@ -1141,9 +1187,7 @@ protected:
                 const int left = xForMs(_file->msOfTick(r->startTick));
                 const int right = xForMs(_file->msOfTick(r->endTick()));
                 const int regionTop = rulerHeight + row * laneHeight + 6;
-                const bool loopHandle = right - left >= 47 &&
-                    pos.x() >= right - 34 && pos.x() < right - 8 &&
-                    pos.y() >= regionTop && pos.y() < regionTop + 29;
+                const bool loopHandle = loopHandleRect(left, right, regionTop).contains(pos);
                 const bool edge = (left >= headerWidth && std::abs(pos.x()-left) <= 8) ||
                                   (right < width() && std::abs(pos.x()-right) <= 8);
                 setCursor(loopHandle || edge ? Qt::SizeHorCursor : Qt::SizeAllCursor);
@@ -1163,6 +1207,17 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && _sectionPressed) {
+            const int x = int(e->position().x());
+            updateSectionDraft(x);
+            _sectionPressed = false;
+            unsetCursor();
+            if (std::abs(x - _sectionAnchorX) >= QApplication::startDragDistance())
+                commitSectionDraft();
+            update();
+            e->accept();
+            return;
+        }
         if (e->button() == Qt::LeftButton && _cycleDrag != CycleDrag::None) {
             updateCycleDrag(int(e->position().x()));
             if (_cycleMoved && _cycleDraft.active() &&
@@ -1257,6 +1312,15 @@ protected:
     }
 
 private:
+    // Anchor the painted handle and its hit target to the actual region end.
+    // A region that continues beyond the viewport has no visible end handle.
+    QRect loopHandleRect(int left, int right, int top) const {
+        if (right - left < 47 || right > width() - 2) return QRect();
+        const QRect handle(right - 33, top + 3, 22, 22);
+        if (handle.left() < headerWidth + 3) return QRect();
+        return handle;
+    }
+
     // Region edits share MidiEditor's existing Protocol undo/redo stack with
     // ordinary note edits. A snapshot stores only independent region metadata.
     // The live target remains owned by this ArrangementWidget; ProtocolItem
@@ -1267,6 +1331,7 @@ private:
             : _owner(widget), _fileAtCapture(widget ? widget->_file.data() : nullptr) {
             if (widget) {
                 _regionsAtCapture = widget->_regions;
+                _sectionsAtCapture = widget->_sections;
                 _tracksAtCapture = widget->_regionTracks;
                 _channelsAtCapture = widget->assignedTrackChannels();
                 _selectedAtCapture = widget->_selectedRegionId;
@@ -1302,6 +1367,8 @@ private:
                 w->_regionTrackEditPendingSave = true;
             w->_regionHistoryRefreshPending = true;
             w->_regions = old->_regionsAtCapture;
+            w->_sections = old->_sectionsAtCapture;
+            w->_sectionPressed = false;
             w->_selectedRegionId = old->_selectedAtCapture;
             w->_selectedRegionIds = old->_selectionAtCapture;
             if (const auto *region = w->_regions.find(w->_selectedRegionId)) {
@@ -1324,6 +1391,7 @@ private:
         QPointer<QWidget> _owner;
         QPointer<MidiFile> _fileAtCapture;
         xiv::MidiRegionModel _regionsAtCapture;
+        QVector<SongSection> _sectionsAtCapture;
         QList<MidiTrack *> _tracksAtCapture;
         QList<int> _channelsAtCapture;
         int _selectedAtCapture = 0;
@@ -1429,6 +1497,141 @@ private:
         update();
     }
 
+    QVector<SongSection> _sections;
+    SongSection _sectionDraft;
+    bool _sectionPressed = false;
+    int _sectionIndex = -1;
+    int _sectionAnchorTick = 0;
+    int _sectionAnchorX = 0;
+
+    bool inSectionLane(const QPoint &pos) const {
+        return _file && pos.x() >= headerWidth &&
+            pos.y() >= _rulerTop + measureRulerHeight && pos.y() < _rulerTop + rulerHeight;
+    }
+
+    int sectionAt(int x) const {
+        for (int i = 0; i < _sections.size(); ++i) {
+            const auto &section = _sections.at(i);
+            if (x >= xForMs(_file->msOfTick(section.start)) &&
+                x < xForMs(_file->msOfTick(section.end))) return i;
+        }
+        return -1;
+    }
+
+    static bool canPlaceSection(const QVector<SongSection> &sections,
+                                const SongSection &candidate, int ignored = -1) {
+        if (candidate.start < 0 || candidate.end <= candidate.start) return false;
+        for (int i = 0; i < sections.size(); ++i) {
+            const auto &other = sections.at(i);
+            if (i != ignored && candidate.start < other.end && other.start < candidate.end)
+                return false;
+        }
+        return true;
+    }
+
+    void updateSectionDraft(int x) {
+        const int tick = timelineTickAt(std::clamp(x, headerWidth, std::max(headerWidth, width())));
+        if (_sectionIndex < 0) {
+            const int first = snapTick(_sectionAnchorTick);
+            const int last = snapTick(tick);
+            _sectionDraft = {QString(), std::min(first, last), std::max(first, last)};
+        } else {
+            const auto &section = _sections.at(_sectionIndex);
+            const int duration = section.end - section.start;
+            const auto raw = std::clamp<int64_t>(
+                static_cast<int64_t>(section.start) + tick - _sectionAnchorTick,
+                0, std::numeric_limits<int>::max() - duration);
+            const int start = std::min(snapTick(static_cast<int>(raw)),
+                                       std::numeric_limits<int>::max() - duration);
+            _sectionDraft = {section.name, start, start + duration};
+        }
+        update();
+    }
+
+    void commitSectionDraft() {
+        if (!canEditQuantize() || !canPlaceSection(_sections, _sectionDraft, _sectionIndex))
+            return;
+        if (_sectionIndex < 0) {
+            const auto document = _file;
+            SongSection section = _sectionDraft;
+            bool accepted = false;
+            const QString name = QInputDialog::getText(this, tr("Add Arrangement Section"),
+                tr("Section name"), QLineEdit::Normal, QString(), &accepted).trimmed();
+            if (!accepted || name.isEmpty() || document != _file || !canEditQuantize() ||
+                !canPlaceSection(_sections, section)) return;
+            auto *before = _regionHistory.copy();
+            section.name = name;
+            _sections.append(section);
+            finishRegionEdit(before, tr("Add Arrangement Section"));
+            return;
+        }
+        const auto &section = _sections.at(_sectionIndex);
+        if (_sectionDraft.start == section.start) return;
+        auto updated = _regions;
+        for (int boundary : {section.start, section.end}) {
+            std::vector<int> crossing;
+            for (const auto &region : updated.regions()) {
+                if (canSplitAt(region, boundary)) crossing.push_back(region.id);
+            }
+            for (int id : crossing) {
+                const auto *region = updated.find(id);
+                // Capture arranged notes before cutting repeats or quantized
+                // regions so both halves retain their current timing.
+                if ((region->loopLengthTicks > 0 || region->quantize.active()) &&
+                    !captureRegion(updated, id)) return;
+                if (!updated.split(id, boundary, xiv::CrossingNoteMode::Split)) return;
+            }
+        }
+        if (!updated.moveContainedRegions(section.start, section.end, _sectionDraft.start))
+            return;
+        auto *before = _regionHistory.copy();
+        _regions = std::move(updated);
+        _sections[_sectionIndex] = _sectionDraft;
+        finishRegionEdit(before, tr("Move Arrangement Section"));
+    }
+
+    void showSectionMenu(QContextMenuEvent *event) {
+        const int index = sectionAt(event->pos().x());
+        if (index < 0 || !canEditQuantize()) return;
+        const auto document = _file;
+        QMenu menu(this);
+        auto *rename = menu.addAction(tr("Rename Section…"));
+        auto *remove = menu.addAction(tr("Delete Section"));
+        const auto *chosen = menu.exec(event->globalPos());
+        if (!chosen || document != _file || !canEditQuantize() || index >= _sections.size())
+            return;
+        if (chosen == rename) {
+            bool accepted = false;
+            const QString oldName = _sections.at(index).name;
+            const QString name = QInputDialog::getText(this, tr("Rename Arrangement Section"),
+                tr("Section name"), QLineEdit::Normal, oldName, &accepted).trimmed();
+            if (!accepted || name.isEmpty() || name == oldName || document != _file ||
+                !canEditQuantize() || index >= _sections.size()) return;
+            auto *before = _regionHistory.copy();
+            _sections[index].name = name;
+            finishRegionEdit(before, tr("Rename Arrangement Section"));
+        } else if (chosen == remove) {
+            auto *before = _regionHistory.copy();
+            _sections.removeAt(index);
+            finishRegionEdit(before, tr("Delete Arrangement Section"));
+        }
+    }
+
+    void drawSection(QPainter &p, const SongSection &section, bool draft) const {
+        const int left = std::max(headerWidth, xForMs(_file->msOfTick(section.start)));
+        const int right = std::min(width(), xForMs(_file->msOfTick(section.end)));
+        if (right <= left) return;
+        const QRect block(left, measureRulerHeight + 2, right - left, sectionLaneHeight - 4);
+        const bool placeable = !draft || canPlaceSection(_sections, section, _sectionIndex);
+        p.fillRect(block, !placeable ? QColor("#653746")
+                                    : draft ? QColor("#346C85") : QColor("#254E64"));
+        p.setPen(QColor("#B9E4F9"));
+        const QRect label = block.adjusted(5, 0, -4, 0);
+        if (label.width() > 0)
+            p.drawText(label, Qt::AlignVCenter,
+                       p.fontMetrics().elidedText(section.name, Qt::ElideRight, label.width()));
+    }
+
     bool isLaneY(int y) const { return y >= _rulerTop + rulerHeight; }
 
     void drawRuler(QPainter &p, const QVector<QPair<int, int>> &marks, int playheadX) const {
@@ -1438,8 +1641,11 @@ private:
         p.fillRect(0, 0, width(), rulerHeight, QColor("#292D34"));
         p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
         p.setPen(QColor("#E8EFF8"));
-        p.drawText(QRect(14, 0, headerWidth - 18, rulerHeight), Qt::AlignVCenter, tr("Tracks"));
+        p.drawText(QRect(14, 0, headerWidth - 18, measureRulerHeight), Qt::AlignVCenter, tr("Tracks"));
+        p.drawText(QRect(14, measureRulerHeight, headerWidth - 18, sectionLaneHeight),
+                   Qt::AlignVCenter, tr("Arrangement"));
         p.setPen(QColor("#515966"));
+        p.drawLine(0, measureRulerHeight, width(), measureRulerHeight);
         p.drawLine(0, rulerHeight - 1, width(), rulerHeight - 1);
         p.drawLine(headerWidth, 0, headerWidth, rulerHeight);
         p.setClipRect(QRect(headerWidth, 0, std::max(0, width() - headerWidth), rulerHeight));
@@ -1470,6 +1676,11 @@ private:
                        Qt::AlignVCenter, tr("Open a MIDI file"));
         for (const auto &mark : marks)
             p.drawText(mark.first + 5, 27, QString::number(mark.second));
+        if (_file) {
+            for (int i = 0; i < _sections.size(); ++i)
+                if (!_sectionPressed || i != _sectionIndex) drawSection(p, _sections.at(i), false);
+            if (_sectionPressed) drawSection(p, _sectionDraft, true);
+        }
         if (playheadX >= headerWidth && playheadX < width()) {
             p.setPen(QPen(QColor("#FFDD75"), 2));
             p.drawLine(playheadX, cycleStripHeight + 8, playheadX, rulerHeight);
@@ -1898,8 +2109,9 @@ private:
             insertRegion(track, tick, {duration, {}}, tr("Add Empty Region"));
     }
 
-    void pasteRegion(int track, int tick) {
-        insertRegion(track, tick, _regionClipboard, tr("Paste Region"));
+    void pasteRegionAtPlayhead(int track) {
+        if (!_file) return;
+        insertRegion(track, _file->cursorTick(), _regionClipboard, tr("Paste Region"));
     }
 
     void insertRegion(int trackIndex, int tick, const xiv::RegionClipboard &clip,
@@ -2102,10 +2314,19 @@ private:
                 loaded.markManagedTrack(track);
             }
         }
-        if (loaded.replaceValidated(incoming, trackCount))
-            _regions = std::move(loaded);
-        else
+        if (!loaded.replaceValidated(incoming, trackCount)) {
             qWarning() << "XIV Midi Studio: invalid region sidecar ignored";
+            return;
+        }
+        _regions = std::move(loaded);
+        for (const auto &value : root.value(QStringLiteral("sections")).toArray()) {
+            const auto row = value.toArray();
+            if (row.size() != 3) continue;
+            const SongSection section{row.at(0).toString().trimmed(),
+                                      row.at(1).toInt(-1), row.at(2).toInt(-1)};
+            if (!section.name.isEmpty() && canPlaceSection(_sections, section))
+                _sections.append(section);
+        }
     }
 
     QPointer<MidiFile> _file;

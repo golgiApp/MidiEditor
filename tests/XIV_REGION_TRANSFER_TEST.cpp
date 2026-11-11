@@ -22,6 +22,32 @@ int main() {
     assert(notes[2].regionId == left && notes[2].channel == 2 && notes[2].velocity == 90);
 
     model = initial;
+    auto section = initial;
+    assert(!section.moveContainedRegions(10, 100, 350));
+    assert(section.find(left)->startTick == 0 && section.find(upper)->startTick == 0);
+    assert(!section.moveContainedRegions(0, 100, std::numeric_limits<int>::max()));
+    assert(section.moveContainedRegions(0, 100, 351));
+    const auto sectionNotes = xiv::renderRegionNotes(source, section);
+    assert(section.find(left)->startTick == 351 && section.find(upper)->startTick == 351);
+    assert(section.find(left)->trackIndex == 0 && section.find(upper)->trackIndex == 1);
+    assert(section.find(right)->startTick == 200);
+    assert(sectionNotes.size() == 3 && sectionNotes[0].startTick == 240);
+    assert(sectionNotes[1].startTick == 361 && sectionNotes[2].startTick == 366);
+
+    // Splitting across the section edges keeps the outer pieces in place.
+    section = initial;
+    const int middle = section.split(left, 15, xiv::CrossingNoteMode::Split);
+    const int outside = section.split(middle, 18, xiv::CrossingNoteMode::Split);
+    assert(middle && outside);
+    assert(section.split(upper, 18, xiv::CrossingNoteMode::Split));
+    assert(section.split(upper, 15, xiv::CrossingNoteMode::Split));
+    assert(section.moveContainedRegions(15, 18, 351));
+    assert(section.find(left)->startTick == 0 && section.find(outside)->startTick == 18);
+    const auto movedNotes = xiv::renderRegionNotes(source, section);
+    assert(std::count_if(movedNotes.begin(), movedNotes.end(), [](const auto &note) {
+        return note.startTick == 351 && note.endTick == 354;
+    }) == 2);
+
     auto overlay = model;
     assert(xiv::consolidateRegions(overlay, {left}, left, 1, 0, 3, 3, source));
     assert(overlay.at(1, 15)->id == left && overlay.find(upper));

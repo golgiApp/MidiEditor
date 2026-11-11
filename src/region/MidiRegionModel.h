@@ -242,6 +242,23 @@ public:
         std::rotate(it, it + 1, _regions.end());
         return true;
     }
+    // Move a time range across every track while preserving region order.
+    bool moveContainedRegions(int start, int end, int destination) {
+        if (start < 0 || end <= start || destination < 0 ||
+            static_cast<int64_t>(destination) + (end - start) >
+                std::numeric_limits<int>::max()) return false;
+        const int delta = destination - start;
+        for (const auto &region : _regions) {
+            if (region.startTick >= end || region.endTick() <= start) continue;
+            if (region.startTick < start || region.endTick() > end) return false;
+        }
+        for (auto &region : _regions) {
+            if (region.startTick >= start && region.endTick() <= end)
+                region.startTick += delta;
+        }
+        return true;
+    }
+
     // An independent copy uses the same source interval but its own region ID.
     bool canDuplicate(int id, int newStartTick) const {
         const MidiRegion *target = find(id);

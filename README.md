@@ -7,6 +7,12 @@
 
 XIV MIDI Studio brings Meowchestra’s MidiEditor quality-of-life features into a redesigned workspace inspired by Logic Pro X, Ableton Live, and Soundtrap. Open a MIDI file, assign SoundFont instruments, arrange phrases across tracks, and edit their notes in the Piano Roll. When your arrangement is ready, export it as a standard MIDI file.
 
+## What's new in v0.3.3
+
+- **Arrangement sections.** Drag across empty space in the **Arrangement** lane below the measure ruler and give the section a name, such as Intro, Verse, or Chorus. Drag the section to a free spot in that lane to move its regions together across all tracks. Regions crossing the section edges split automatically, with sustained notes retriggered at the cut. Right-click to rename or remove the section label. Section edits support Undo and Redo and are saved with the region layout.
+- **Paste regions at the playhead.** Copy a region, select a destination track, and press **Ctrl+V** in the Arrangement. You can also right-click the destination track lane and choose **Paste Region at Playhead**. The pasted region starts at the exact playhead tick, including when Snap to Grid is on.
+- **Loop handle placement.** The loop icon and its drag target stay at the region's actual right edge as the timeline scrolls.
+
 ## What's new in v0.3
 
 ### Arrangement and workspace
@@ -36,7 +42,7 @@ XIV MIDI Studio brings Meowchestra’s MidiEditor quality-of-life features into 
 
 ## Windows downloads and development status
 
-Check this repository’s **Releases** tab for published Windows builds. The v0.3 feature list above describes the current source. The latest Windows build is still being tested, including cycle playback and the Piano Roll right-click commands.
+Check this repository’s **Releases** tab for published Windows builds. The v0.3 feature list above describes the current source. The latest Windows build is still being tested, including cycle playback and the Piano Roll right-click commands. download link here: https://github.com/golgiApp/XIVMIDIStudio/releases/tag/0.3.2 
 
 The [upstream MidiEditor manual](https://meowchestra.github.io/MidiEditor/manual/) covers basic MIDI editing and setup.
 

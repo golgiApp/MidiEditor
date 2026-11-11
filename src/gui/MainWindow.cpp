@@ -913,8 +913,8 @@ MainWindow::MainWindow(QString initFile)
         // Playback is based on MidiFile::cursorTick() (or an older pauseTick).
         // Stop first, then replace both so the next Play starts at this click.
         if (MidiPlayer::isPlaying()) stop();
-        const int tick = std::clamp(requestedTick, 0,
-                                    std::max(file->endTick(), file->arrangementEndTick()));
+        // Allow placement and paste in empty timeline space beyond the last note.
+        const int tick = std::max(0, requestedTick);
         file->setPauseTick(-1);
         file->setCursorTick(tick);
         const int actualMs = file->msOfTick(tick);
@@ -1051,7 +1051,7 @@ MainWindow::MainWindow(QString initFile)
     const auto pinTrackHeader = [this, trackHeaderActions](int top) {
         _arrangementWidget->setRulerTop(top);
         trackHeaderActions->move(ArrangementWidget::headerWidth - trackHeaderActions->width() - 9,
-                                 top + (ArrangementWidget::rulerHeight - trackHeaderActions->height()) / 2);
+                                 top + (ArrangementWidget::measureRulerHeight - trackHeaderActions->height()) / 2);
     };
     trackHeaderActions->setFixedSize(trackHeaderActions->sizeHint());
     auto *trackScrollBar = arrangementArea->verticalScrollBar();
