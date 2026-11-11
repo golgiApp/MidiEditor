@@ -22,6 +22,7 @@ inline int emptyRegionGapDuration(const MidiRegionModel &model, int track, int s
 struct RegionClipboard {
     int duration = 0;
     std::vector<OwnedRegionNote> notes;
+    std::string name;
 };
 
 inline int insertOwnedRegion(MidiRegionModel &model, int track, int start, int trackCount,
@@ -40,6 +41,7 @@ inline int insertOwnedRegion(MidiRegionModel &model, int track, int start, int t
     const int id = model.addInitial(track, 0, clip.duration);
     model.move(id, start);
     model.replaceOwnedNotes(id, std::move(notes));
+    model.rename(id, clip.name);
     return id;
 }
 
@@ -77,6 +79,7 @@ inline bool consolidateRegions(MidiRegionModel &model, const std::set<int> &ids,
     }
 
     MidiRegion result{primaryId, destinationTrack, destinationStart, 0, last - first};
+    result.name = primary->name;
     result.ownedNotes = std::make_shared<const std::vector<OwnedRegionNote>>(std::move(notes));
     std::vector<MidiRegion> regions;
     for (const auto &region : model.regions())

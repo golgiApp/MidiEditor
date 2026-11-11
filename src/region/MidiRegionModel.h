@@ -17,6 +17,7 @@
 #include <memory>
 #include <utility>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace xiv {
@@ -87,6 +88,7 @@ struct MidiRegion {
     // Null uses track source notes. An allocated empty list means silence.
     // Replacing the immutable list makes editing a duplicate independent.
     std::shared_ptr<const std::vector<OwnedRegionNote>> ownedNotes{};
+    std::string name;
 
     int duration() const { return sourceEndTick - sourceStartTick; }
     int displayDuration() const { return loopLengthTicks > 0 ? loopLengthTicks : duration(); }
@@ -133,6 +135,14 @@ public:
         return _managedTracks.count(trackIndex) != 0;
     }
     const std::set<int> &managedTracks() const { return _managedTracks; }
+    bool rename(int id, std::string name) {
+        for (auto &region : _regions) {
+            if (region.id != id || region.name == name) continue;
+            region.name = std::move(name);
+            return true;
+        }
+        return false;
+    }
     bool replaceOwnedNotes(int id, std::vector<OwnedRegionNote> notes) {
         if (!validOwnedNotes(notes)) return false;
         for (auto &region : _regions) {
@@ -221,7 +231,7 @@ public:
             r.endNoteMode = behavior;
             const int newId = _nextId++;
             _regions.push_back({newId, r.trackIndex, timelineTick, sourceSplit,
-                                oldEnd, behavior, previousEndMode, 0, r.quantize, r.ownedNotes});
+                                oldEnd, behavior, previousEndMode, 0, r.quantize, r.ownedNotes, r.name});
             return newId;
         }
         return 0;
@@ -278,7 +288,7 @@ public:
         _regions.push_back({newId, source.trackIndex, newStartTick,
                             source.sourceStartTick, source.sourceEndTick,
                             source.startNoteMode, source.endNoteMode,
-                            source.loopLengthTicks, source.quantize, source.ownedNotes});
+                            source.loopLengthTicks, source.quantize, source.ownedNotes, source.name});
         return newId;
     }
     // Trim the left boundary while preserving the source/timeline offset.

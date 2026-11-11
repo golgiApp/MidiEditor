@@ -832,7 +832,7 @@ MainWindow::MainWindow(QString initFile)
         swing->setValue(settings.swing);
 
         const bool editable = _arrangementWidget->canEditQuantize();
-        regionName->setText(region ? tr("Region %1").arg(region->id) : tr("Select a region"));
+        regionName->setText(_arrangementWidget->selectedRegionName());
         grid->setEnabled(region && editable);
         strength->setEnabled(region && editable && settings.gridTicks > 0);
         swing->setEnabled(region && editable && settings.gridTicks > 0);
@@ -955,10 +955,8 @@ MainWindow::MainWindow(QString initFile)
         if (_pianoRollTrackLabel) {
             if (_showAllTracksInPianoRoll)
                 _pianoRollTrackLabel->setText(tr("All Regions"));
-            else if (const auto *r = _arrangementWidget->regionModel().find(regionId))
-                _pianoRollTrackLabel->setText(tr("Region %1").arg(r->id));
             else
-                _pianoRollTrackLabel->setText(tr("Select a region"));
+                _pianoRollTrackLabel->setText(_arrangementWidget->selectedRegionName());
         }
         if (_matrixWidgetContainer) _matrixWidgetContainer->update();
     };
@@ -1371,10 +1369,10 @@ MainWindow::MainWindow(QString initFile)
     };
     QLabel *positionValue, *timeValue, *tempoValue, *meterValue, *keyValue;
     auto *position = addReadout(tr("BAR · BEAT"), tr("Jump to a bar and beat"), 76, positionValue);
-    addReadout(tr("TIME"), tr("Elapsed playhead time (minutes:seconds.hundredths)"), 108, timeValue, false);
     auto *tempoButton = addReadout(tr("BPM"), tr("Edit the project’s starting tempo"), 52, tempoValue);
     auto *meterButton = addReadout(tr("METER"), tr("Edit the project’s starting time signature"), 55, meterValue);
     auto *keyButton = addReadout(tr("KEY"), tr("Edit the project’s starting key signature"), 72, keyValue);
+    addReadout(tr("TIME"), tr("Elapsed playhead time (minutes:seconds.hundredths)"), 108, timeValue, false);
     bar->addWidget(lcd);
     bar->addSpacing(6);
     auto *snapAction = _actionMap.value("magnet");
@@ -5015,8 +5013,8 @@ void MainWindow::editTrack(int i, bool assign) {
     if (_pianoRollTrackLabel) {
         if (_showAllTracksInPianoRoll)
             _pianoRollTrackLabel->setText(tr("All Regions"));
-        else if (_arrangementWidget && _arrangementWidget->selectedRegionId() > 0)
-            _pianoRollTrackLabel->setText(tr("Region %1").arg(_arrangementWidget->selectedRegionId()));
+        else if (_arrangementWidget)
+            _pianoRollTrackLabel->setText(_arrangementWidget->selectedRegionName());
         else
             _pianoRollTrackLabel->setText(tr("Select a region"));
     }

@@ -25,6 +25,9 @@
 #include <QScrollArea>
 #include <QFontMetrics>
 #include <QCursor>
+#include <QPixmap>
+#include <QRegularExpression>
+#include <tuple>
 #include <QPolygon>
 #include <QPointer>
 #include <QToolTip>
@@ -187,8 +190,7 @@ public:
                             const QString &description) {
         const auto *region = _regions.find(id);
         if (!_file || MidiPlayer::isPlaying() || MidiInput::recording() ||
-            id != _selectedRegionId || !region || region->loopLengthTicks ||
-            region->quantize.active()) return;
+            id != _selectedRegionId || !region || region->loopLengthTicks) return;
         ProtocolEntry *before = _regionHistory.copy();
         if (!_regions.replaceOwnedNotes(id, std::move(notes))) {
             delete before;
@@ -333,6 +335,16 @@ public:
     }
     MidiTrack *selectedTrack() const { return _selected; }
 
+    static QString regionDisplayName(const xiv::MidiRegion &region) {
+        return region.name.empty() ? tr("Region %1").arg(region.id)
+                                   : QString::fromStdString(region.name);
+    }
+
+    QString selectedRegionName() const {
+        const auto *region = _regions.find(_selectedRegionId);
+        return region ? regionDisplayName(*region) : tr("Select a region");
+    }
+
     // Playback and the Piano Roll receive the same MIDI player clock.
     // Scroll only when necessary so the cursor stays visible across all lanes.
     void setPlayheadMs(int ms) {
@@ -459,6 +471,7 @@ public:
             entry.insert(QStringLiteral("quantizeGridTicks"), r.quantize.gridTicks);
             entry.insert(QStringLiteral("quantizeStrength"), r.quantize.strength);
             entry.insert(QStringLiteral("quantizeSwing"), r.quantize.swing);
+            if (!r.name.empty()) entry.insert(QStringLiteral("name"), QString::fromStdString(r.name));
             if (r.ownedNotes) {
                 version = 2;
                 QJsonArray notes;
@@ -506,6 +519,7 @@ protected:
             const auto *key = static_cast<QKeyEvent *>(e);
             if ((_selectedRegionId && isSplitShortcut(key)) || isJoinShortcut(key) ||
                 regionClipboardShortcut(key) ||
+                (_selectedRegionId && regionOctaveShift(key) != 0) ||
                 (matchesCommand(key, QStringLiteral("xiv_arrangement_delete")) &&
                  (_tempoSelected >= 0 || _selectedRegionId || (_trackHeaderSelected && _selected)))) {
                 e->accept();
@@ -538,6 +552,11 @@ protected:
         }
         if (_selectedRegionId && isSplitShortcut(e)) {
             if (_file && !e->isAutoRepeat()) splitSelectedAtPlayhead();
+            e->accept();
+            return;
+        }
+        if (const int semitones = regionOctaveShift(e); _selectedRegionId && semitones != 0) {
+            if (!e->isAutoRepeat()) transposeRegion(_selectedRegionId, semitones);
             e->accept();
             return;
         }
@@ -688,14 +707,17 @@ protected:
                 // A small title identifies each selectable region.
                 p.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::DemiBold));
                 p.setPen(selectedRegion ? QColor("#FFE0AC") : QColor("#AFBBCB"));
-                p.drawText(regionRect.adjusted(5, 3, -4, -3),
-                           Qt::AlignLeft | Qt::AlignTop,
-                           QStringLiteral("Region %1").arg(region.id));
                 // Dedicated upper-right looping handle, distinct from
                 // draggable left/right trim edges.
                 const QRect loopIcon = loopHandleRect(
                     xForMs(_file->msOfTick(region.startTick)),
                     xForMs(_file->msOfTick(region.endTick())), y + 6);
+                QRect title = regionRect.adjusted(5, 3, -4, -3);
+                if (!loopIcon.isEmpty()) title.setRight(loopIcon.left() - 3);
+                if (title.width() > 0)
+                    p.drawText(title, Qt::AlignLeft | Qt::AlignTop,
+                               p.fontMetrics().elidedText(regionDisplayName(region),
+                                                         Qt::ElideRight, title.width()));
                 if (!loopIcon.isEmpty()) {
                     p.fillRect(loopIcon, QColor(25, 34, 43, 170));
                     QFont loopFont = p.font();
@@ -947,6 +969,12 @@ protected:
                         return target && canSplitAt(*target, cursorTick);
                     }));
                 menu.addSeparator();
+                auto *rename = menu.addMenu(tr("Rename"));
+                rename->setEnabled(canEditQuantize());
+                connect(rename->addAction(tr("Rename Region…")), &QAction::triggered,
+                        this, [this, id]() { renameRegions(id, false); });
+                connect(rename->addAction(tr("Use Track Name")), &QAction::triggered,
+                        this, [this, id]() { renameRegions(id, true); });
                 addRegionNoteActions(menu, id);
                 menu.addSeparator();
                 QAction *deleteRegionAction = menu.addAction(withShortcut(
@@ -1235,6 +1263,22 @@ protected:
             e->accept();
             return;
         }
+        if (inTempoLane(pos) && pos.x() >= headerWidth && !_timelinePressed &&
+            !_regionPressed && _cycleDrag == CycleDrag::None) {
+            const auto points = xiv::readTempoMap(_file);
+            const auto [kind, tick] = tempoHit(points, pos);
+            setCursor(kind == TempoDrag::None ? Qt::CrossCursor : Qt::SizeAllCursor);
+            if (kind == TempoDrag::Corner) {
+                QToolTip::showText(e->globalPosition().toPoint(),
+                    points.value(tick).rampToNext
+                        ? tr("Drag to shape the tempo ramp. Double-click to restore the step.")
+                        : tr("Drag to turn the tempo step into a ramp."), this);
+            } else {
+                QToolTip::hideText();
+            }
+            e->accept();
+            return;
+        }
         if (inSectionLane(pos) && !_timelinePressed && !_regionPressed &&
             _cycleDrag == CycleDrag::None) {
             setCursor(sectionAt(pos.x()) >= 0 ? Qt::OpenHandCursor : Qt::CrossCursor);
@@ -1283,9 +1327,10 @@ protected:
             if (!_regionDragging &&
                 std::max(horizontalDistance, verticalDistance) >= QApplication::startDragDistance()) {
                 _regionDragging = true;
-                setCursor((_dragMode == RegionDragMode::TrimLeft ||
-                           _dragMode == RegionDragMode::TrimRight) ?
-                          Qt::SizeHorCursor : Qt::SizeAllCursor);
+                if (_dragMode == RegionDragMode::Loop) setCursor(loopCursor());
+                else setCursor((_dragMode == RegionDragMode::TrimLeft ||
+                                _dragMode == RegionDragMode::TrimRight) ?
+                               Qt::SizeHorCursor : Qt::SizeAllCursor);
             }
             if (_regionDragging) {
                 const int mouseTick = timelineTickAt(pos.x());
@@ -1354,7 +1399,8 @@ protected:
                 const bool loopHandle = loopHandleRect(left, right, regionTop).contains(pos);
                 const bool edge = (left >= headerWidth && std::abs(pos.x()-left) <= 8) ||
                                   (right < width() && std::abs(pos.x()-right) <= 8);
-                setCursor(loopHandle || edge ? Qt::SizeHorCursor : Qt::SizeAllCursor);
+                if (loopHandle) setCursor(loopCursor());
+                else setCursor(edge ? Qt::SizeHorCursor : Qt::SizeAllCursor);
                 if (loopHandle) QToolTip::showText(e->globalPosition().toPoint(),
                               tr("Drag to loop this region; release for a partial repeat"), this);
                 else if (edge) QToolTip::showText(e->globalPosition().toPoint(),
@@ -1483,6 +1529,27 @@ protected:
 private:
     // Anchor the painted handle and its hit target to the actual region end.
     // A region that continues beyond the viewport has no visible end handle.
+    static const QCursor &loopCursor() {
+        static const QCursor cursor = [] {
+            QPixmap icon(24, 24);
+            icon.fill(Qt::transparent);
+            QPainter painter(&icon);
+            painter.setRenderHint(QPainter::Antialiasing);
+            const QRectF ring(4, 4, 15, 15);
+            const QPolygonF tip{QPointF(19, 8), QPointF(15, 13), QPointF(22, 13)};
+            painter.setPen(QPen(Qt::black, 4, Qt::SolidLine, Qt::RoundCap));
+            painter.drawArc(ring, 50 * 16, 310 * 16);
+            painter.setPen(QPen(Qt::white, 2, Qt::SolidLine, Qt::RoundCap));
+            painter.drawArc(ring, 50 * 16, 310 * 16);
+            painter.setPen(QPen(Qt::black, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.setBrush(Qt::white);
+            painter.drawPolygon(tip);
+            painter.end();
+            return QCursor(icon, 12, 12);
+        }();
+        return cursor;
+    }
+
     QRect loopHandleRect(int left, int right, int top) const {
         if (right - left < 47 || right > width() - 2) return QRect();
         const QRect handle(right - 33, top + 3, 22, 22);
@@ -1787,13 +1854,12 @@ private:
             const int nextY = next == points.cend() ? y : tempoY(next.value().bpm(), low, high);
             p.setPen(QPen(QColor("#72C5C0"), 2));
             if (point.value().rampToNext && next != points.cend()) {
-                // The ramp is linear in ticks. Sample its display against
-                // the same tempo-aware clock used by the Arrangement ruler.
+                // Sample the same tempo curve used to generate playback events.
                 QPoint last(x, y);
-                for (int i = 1; i <= 16; ++i) {
-                    const int tick = point.key() + int(qint64(next.key() - point.key()) * i / 16);
-                    const double bpm = point.value().bpm() +
-                        (next.value().bpm() - point.value().bpm()) * i / 16;
+                for (int i = 1; i <= 32; ++i) {
+                    const double fraction = i / 32.0;
+                    const int tick = point.key() + qRound((next.key() - point.key()) * fraction);
+                    const double bpm = xiv::tempoCurveBpm(point.value(), next.value(), fraction);
                     const QPoint sample(xForMs(_file->msOfTick(tick)), tempoY(bpm, low, high));
                     p.drawLine(last, sample);
                     last = sample;
@@ -1804,6 +1870,11 @@ private:
             }
             if (next != points.cend() && (point.value().rampToNext || y != nextY)) {
                 const auto corner = tempoCorner(point, next, low, high);
+                if (point.value().rampToNext) {
+                    const double bpm = xiv::tempoCurveBpm(point.value(), next.value(), point.value().curve.time);
+                    p.setPen(QPen(QColor("#A4BC88"), 1, Qt::DashLine));
+                    p.drawLine(corner, QPoint(corner.x(), tempoY(bpm, low, high)));
+                }
                 p.fillRect(QRect(corner - QPoint(3, 3), QSize(7, 7)), QColor("#A4BC88"));
             }
             p.fillRect(QRect(x - 4, y - 4, 9, 9), point.key() == _tempoSelected
@@ -1817,26 +1888,36 @@ private:
                        double low, double high) const {
         if (!point.value().rampToNext)
             return {xForMs(_file->msOfTick(next.key())), tempoY(point.value().bpm(), low, high)};
-        const int mid = point.key() + (next.key() - point.key()) / 2;
-        return {xForMs(_file->msOfTick(mid)),
-                tempoY((point.value().bpm() + next.value().bpm()) / 2, low, high)};
+        const auto curve = point.value().curve;
+        const int tick = point.key() + qRound((next.key() - point.key()) * curve.time);
+        const double bpm = std::lerp(point.value().bpm(), next.value().bpm(), curve.progress);
+        return {xForMs(_file->msOfTick(tick)), tempoY(bpm, low, high)};
     }
     std::pair<TempoDrag, int> tempoHit(const xiv::TempoMap &points, const QPoint &pos) const {
         const auto [low, high] = tempoScale(points);
         const QPoint local(pos.x(), pos.y() - _rulerTop);
+        std::pair<TempoDrag, int> hit{TempoDrag::None, -1};
+        int closest = 10;
         for (auto point = points.cbegin(); point != points.cend(); ++point) {
             const QPoint dot(xForMs(_file->msOfTick(point.key())), tempoY(point.value().bpm(), low, high));
-            if ((dot - local).manhattanLength() <= 9) return {TempoDrag::Point, point.key()};
+            const int distance = (dot - local).manhattanLength();
+            if (distance < closest) {
+                closest = distance;
+                hit = {TempoDrag::Point, point.key()};
+            }
         }
         for (auto point = points.cbegin(); point != points.cend(); ++point) {
             const auto next = std::next(point);
             if (next == points.cend()) break;
             if (point.value().rampToNext || point.value().microseconds != next.value().microseconds) {
-                if ((tempoCorner(point, next, low, high) - local).manhattanLength() <= 9)
-                    return {TempoDrag::Corner, point.key()};
+                const int distance = (tempoCorner(point, next, low, high) - local).manhattanLength();
+                if (distance < closest) {
+                    closest = distance;
+                    hit = {TempoDrag::Corner, point.key()};
+                }
             }
         }
-        return {TempoDrag::None, -1};
+        return hit;
     }
     void deleteSelectedTempoPoint() {
         if (!canEditQuantize() || _tempoSelected <= 0) return;
@@ -1851,7 +1932,7 @@ private:
     void addTempoPoint(int tick) {
         auto points = xiv::readTempoMap(_file);
         if (!points.contains(tick)) {
-            points.insert(tick, xiv::tempoAt(points, tick));
+            xiv::insertTempoPoint(points, tick);
             xiv::writeTempoMap(_file, points, tr("Add Tempo Point"));
         }
         _tempoSelected = tick;
@@ -1888,7 +1969,22 @@ private:
         auto point = _tempoDraft.find(_tempoOriginalTick);
         if (point == _tempoDraft.end()) return;
         if (_tempoDrag == TempoDrag::Corner) {
-            point.value().rampToNext = true;
+            auto &value = point.value();
+            const auto next = std::next(point);
+            if (next == _tempoDraft.end()) return;
+            if (value.rampToNext) {
+                const int deltaTicks = timelineTickAt(pos.x()) - timelineTickAt(_tempoPress.x());
+                const double bpmSpan = next.value().bpm() - value.bpm();
+                if (delta.x() != 0)
+                    value.curve.time = std::clamp(
+                        value.curve.time + double(deltaTicks) / (next.key() - point.key()), 0.0, 1.0);
+                if (delta.y() != 0 && bpmSpan != 0.0)
+                    value.curve.progress = std::clamp(value.curve.progress -
+                        delta.y() * (_tempoHigh - _tempoLow) / ((tempoLaneHeight - 20) * bpmSpan), 0.0, 1.0);
+            } else {
+                value.rampToNext = true;
+                value.curve = {};
+            }
         } else {
             auto value = point.value();
             if (delta.y() != 0)
@@ -1907,9 +2003,11 @@ private:
     }
     void finishTempoDrag(const QPoint &pos) {
         updateTempoDraft(pos);
+        const auto gesture = _tempoDrag;
         _tempoDrag = TempoDrag::None;
         if (_tempoMoved && canEditQuantize())
-            xiv::writeTempoMap(_file, _tempoDraft, tr("Edit Tempo Point"));
+            xiv::writeTempoMap(_file, _tempoDraft, gesture == TempoDrag::Corner
+                              ? tr("Shape Tempo Ramp") : tr("Edit Tempo Point"));
         _tempoDraft.clear();
         update();
     }
@@ -1920,6 +2018,7 @@ private:
         if (kind == TempoDrag::Corner) {
             if (!points[tick].rampToNext) return;
             points[tick].rampToNext = false;
+            points[tick].curve = {};
         } else {
             const auto document = _file;
             bool ok = false;
@@ -1932,7 +2031,7 @@ private:
         xiv::writeTempoMap(_file, points, tr("Edit Tempo Point"));
     }
 
-    bool _showGlobalTracks = true;
+    bool _showGlobalTracks = false;
     QVector<SongSection> _sections;
     SongSection _sectionDraft;
     bool _sectionPressed = false;
@@ -2188,6 +2287,12 @@ private:
         return commandShortcuts && commandShortcuts(id).contains(QKeySequence(event->keyCombination()));
     }
 
+    int regionOctaveShift(const QKeyEvent *event) const {
+        if (matchesCommand(event, QStringLiteral("transpose_up"))) return 12;
+        if (matchesCommand(event, QStringLiteral("transpose_down"))) return -12;
+        return 0;
+    }
+
     QString withShortcut(const QString &label, const QString &id) const {
         const auto bindings = commandShortcuts ? commandShortcuts(id) : QList<QKeySequence>{};
         return bindings.isEmpty() ? label : label + QLatin1Char('\t') +
@@ -2317,6 +2422,48 @@ private:
         return source;
     }
 
+    void renameRegions(int id, bool useTrackName) {
+        if (!canEditQuantize() || !_regions.find(id)) return;
+        const auto document = _file;
+        auto ids = _selectedRegionIds.count(id) ? _selectedRegionIds : std::set<int>{id};
+        std::vector<xiv::MidiRegion> targets;
+        for (int selected : ids)
+            if (const auto *region = _regions.find(selected)) targets.push_back(*region);
+        std::sort(targets.begin(), targets.end(), [](const auto &left, const auto &right) {
+            return std::tie(left.startTick, left.trackIndex, left.id) <
+                   std::tie(right.startTick, right.trackIndex, right.id);
+        });
+
+        QString name;
+        if (!useTrackName) {
+            bool accepted = false;
+            const QString initial = targets.size() == 1 ? regionDisplayName(targets.front()) : QString();
+            name = QInputDialog::getText(this, tr("Rename Region"), tr("Region name"),
+                                        QLineEdit::Normal, initial, &accepted).trimmed();
+            if (!accepted || name.isEmpty() || document != _file || !canEditQuantize()) return;
+        }
+
+        static const QRegularExpression trailingNumber(QStringLiteral("([0-9]+)$"));
+        const auto suffix = trailingNumber.match(name);
+        bool numbered = false;
+        const auto number = suffix.captured(1).toULongLong(&numbered);
+        const bool increment = numbered && targets.size() > 1 &&
+            number <= std::numeric_limits<qulonglong>::max() - (targets.size() - 1);
+        const QString prefix = increment ? name.left(suffix.capturedStart(1)) : name;
+        auto updated = _regions;
+        bool changed = false;
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            const auto *region = updated.find(targets[i].id);
+            if (!region) continue;
+            QString title = name;
+            if (useTrackName) title = _file->track(region->trackIndex)->name();
+            else if (increment)
+                title = prefix + QStringLiteral("%1").arg(number + i, suffix.capturedLength(1), 10, QLatin1Char('0'));
+            changed |= updated.rename(region->id, title.toStdString());
+        }
+        if (changed) installRegionNoteEdit(std::move(updated), tr("Rename Regions"));
+    }
+
     void addRegionNoteActions(QMenu &menu, int id) {
         const bool editable = canEditQuantize();
         auto add = [&](QMenu &parent, const QString &name, auto handler) {
@@ -2328,6 +2475,10 @@ private:
             if (regionQuantizeRequested) regionQuantizeRequested();
         });
         add(menu, tr("Transpose Region..."), [this, id]() { transposeRegion(id); });
+        add(menu, withShortcut(tr("Transpose Region Up an Octave"), QStringLiteral("transpose_up")),
+            [this, id]() { transposeRegion(id, 12); });
+        add(menu, withShortcut(tr("Transpose Region Down an Octave"), QStringLiteral("transpose_down")),
+            [this, id]() { transposeRegion(id, -12); });
         add(menu, tr("Explode Region Chords to Tracks"), [this, id]() {
             distributeRegionNotes(id, false);
         });
@@ -2365,8 +2516,11 @@ private:
         bool accepted = false;
         const int semitones = QInputDialog::getInt(this, tr("Transpose Region"),
             tr("Semitones"), 0, -127, 127, 1, &accepted);
-        if (!accepted || !semitones || document != _file || !canEditQuantize()) return;
+        if (accepted && document == _file) transposeRegion(id, semitones);
+    }
 
+    void transposeRegion(int id, int semitones) {
+        if (!semitones || !canEditQuantize()) return;
         auto updated = _regions;
         const auto *region = updated.find(id);
         if (!region) return;
@@ -2510,7 +2664,7 @@ private:
         auto snapshot = _regions;
         if (!captureRegion(snapshot, id)) return;
         const auto *region = snapshot.find(id);
-        _regionClipboard = {region->duration(), *region->ownedNotes};
+        _regionClipboard = {region->duration(), *region->ownedNotes, region->name};
     }
 
     QRect _emptyRegionButton;
@@ -2777,6 +2931,7 @@ private:
                                 {o.value(QStringLiteral("quantizeGridTicks")).toInt(0),
                                  o.value(QStringLiteral("quantizeStrength")).toInt(100),
                                  o.value(QStringLiteral("quantizeSwing")).toInt(50)}});
+            incoming.back().name = o.value(QStringLiteral("name")).toString().toStdString();
             const auto storedNotes = o.value(QStringLiteral("ownedNotes"));
             if (storedNotes.isUndefined()) continue;
             if (version != 2 || !storedNotes.isArray()) return;

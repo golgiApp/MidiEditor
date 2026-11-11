@@ -1428,6 +1428,8 @@ void MatrixWidget::paintPianoKey(QPainter *painter, int number, int x, int y,
 void MatrixWidget::setFile(MidiFile *f) {
     stopAllEmulationNotes();
     file = f;
+    _pitchRangeDragging = false;
+    _pitchRangeExisting.clear();
     _regionViewNotes.clear();
     _regionFullNotes.clear();
     _regionViewIds.clear();
@@ -1615,7 +1617,7 @@ const xiv::MidiRegion *MatrixWidget::editableRegion() const {
     if (!file || !enabled || !_regionViewEnabled || _regionShowAll ||
         !commitRegionNotes || MidiPlayer::isPlaying() || MidiInput::recording()) return nullptr;
     const auto *region = _regionViewModel.find(_selectedViewRegionId);
-    return region && !region->loopLengthTicks && !region->quantize.active() ? region : nullptr;
+    return region && !region->loopLengthTicks ? region : nullptr;
 }
 
 QRect MatrixWidget::regionNoteRect(const xiv::RenderedRegionNote &note) {
@@ -2063,7 +2065,7 @@ bool MatrixWidget::beginRegionGesture(QMouseEvent *event) {
     if (!editableRegion()) {
         if (_selectedViewRegionId && !_regionShowAll && !MidiPlayer::isPlaying() && !MidiInput::recording())
             QToolTip::showText(event->globalPosition().toPoint(),
-                tr("Turn off region quantization or remove the loop extension to edit these notes."), this);
+                tr("Remove the loop extension to edit these notes in this view."), this);
         return true;
     }
     if (event->button() == Qt::RightButton &&
@@ -2245,8 +2247,8 @@ bool MatrixWidget::deleteRegionSelection() {
     return true;
 }
 
-// XIV MIDI Studio: pitch-key selection always searches the whole focused track,
-// including notes in other regions and outside the displayed time window.
+// Select the pitch range across the current Piano Roll scope, including
+// notes beyond the visible time window.
 void MatrixWidget::selectPitchRange(int low, int high) {
     if (!file || !Selection::instance()) return;
     low = std::clamp(low, 0, 127);
@@ -2259,7 +2261,7 @@ void MatrixWidget::selectPitchRange(int low, int high) {
         updateAllTracksView();
         return;
     }
-    if (editableRegion()) {
+    if (_regionViewEnabled) {
         _regionSelection = _regionBoxBase;
         for (const auto &note : _regionViewNotes) {
             if (note.pitch >= low && note.pitch <= high)
@@ -2305,6 +2307,10 @@ void MatrixWidget::mouseMoveEvent(QMouseEvent *event) {
         updateRegionGesture(event->position().toPoint());
         event->accept();
         return;
+    }
+    if (_pitchRangeDragging && !(event->buttons() & Qt::LeftButton)) {
+        _pitchRangeDragging = false;
+        _pitchRangeExisting.clear();
     }
     if (_pitchRangeDragging) {
         const int currentPitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
@@ -2557,7 +2563,13 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
     // Alt+left retains the former note-audition shortcut; right click retains
     // drum-key visual marking and latch operations.
     if (file && enabled && event->button() == Qt::LeftButton &&
-        mouseInRect(PianoArea) && !(event->modifiers() & Qt::AltModifier)) {
+        PianoArea.contains(event->position()) &&
+        event->position().x() < lineNameWidth &&
+        !(event->modifiers() & Qt::AltModifier)) {
+        // With OpenGL the visible wrapper receives the real mouse events and
+        // owns Qt's implicit mouse grab. The hidden matrix receives forwards.
+        QWidget *focusTarget = isVisible() ? this : parentWidget();
+        if (focusTarget) focusTarget->setFocus(Qt::MouseFocusReason);
         const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
         _pitchRangeDragging = true;
         _pitchRangeAnchor = pitch;
@@ -2566,7 +2578,6 @@ void MatrixWidget::mousePressEvent(QMouseEvent *event) {
         _regionBoxBase = _pitchRangeAdditive ? _regionSelection : std::set<int>{};
         _allBoxBase = _pitchRangeAdditive ? _allSelection : std::set<int>{};
         selectPitchRange(pitch, pitch);
-        grabMouse();
         event->accept();
         return;
     }
@@ -2782,7 +2793,7 @@ void MatrixWidget::mouseReleaseEvent(QMouseEvent *event) {
         _pitchRangeDragging = false;
         const int pitch = std::clamp(127 - lineAtY(qRound(event->position().y())), 0, 127);
         selectPitchRange(_pitchRangeAnchor, pitch);
-        releaseMouse();
+        _pitchRangeExisting.clear();
         event->accept();
         return;
     }
