@@ -779,32 +779,42 @@ MainWindow::MainWindow(QString initFile)
         }
         QSet<int> seenPrograms;
         const int currentProgram = file->channel(activeChannel)->progAtTick(file->cursorTick());
+        const auto addPreset = [this, &seenPrograms, track, activeChannel, currentProgram](
+                                   QMenu *group, const QString &name, int program) {
+            if (seenPrograms.contains(program)) return;
+            seenPrograms.insert(program);
+            QAction *action = group->addAction(name);
+            action->setCheckable(true);
+            action->setChecked(program == currentProgram);
+            QObject::connect(action, &QAction::triggered, this,
+                [this, track, activeChannel, name, program]() {
+                    if (!file || !file->tracks()->contains(track)) return;
+                    file->protocol()->startNewAction(tr("Change Track Instrument"));
+                    assignTrackProgram(file, track, activeChannel, program);
+                    track->setName(name);
+                    file->protocol()->endAction();
+                    MidiOutput::sendProgram(activeChannel, program);
+                    if (_arrangementWidget) _arrangementWidget->rebuildPreview();
+                    if (_pianoRollTrackLabel &&
+                        NewNoteTool::editTrack() == track->number())
+                        _pianoRollTrackLabel->setText(name);
+                });
+        };
         for (const QString &path : paths) {
             const auto presets = xivReadSoundFontPresets(path);
             if (presets.isEmpty()) continue;
             QMenu *fontMenu = menu.addMenu(QFileInfo(path).completeBaseName());
             for (const auto &preset : presets) {
                 // Bank 0 is preserved by a regular program-change MIDI event.
-                // Additional SF2 banks need bank-select events and are omitted here.
-                if (preset.bank != 0 || seenPrograms.contains(preset.program)) continue;
-                seenPrograms.insert(preset.program);
-                QAction *action = fontMenu->addAction(preset.name);
-                action->setCheckable(true);
-                action->setChecked(preset.program == currentProgram);
-                QObject::connect(action, &QAction::triggered, this,
-                    [this, track, activeChannel, preset]() {
-                        if (!file || !file->tracks()->contains(track)) return;
-                        file->protocol()->startNewAction(tr("Change Track Instrument"));
-                        assignTrackProgram(file, track, activeChannel, preset.program);
-                        track->setName(preset.name);
-                        file->protocol()->endAction();
-                        MidiOutput::sendProgram(activeChannel, preset.program);
-                        if (_arrangementWidget) _arrangementWidget->rebuildPreview();
-                        if (_pianoRollTrackLabel &&
-                            NewNoteTool::editTrack() == track->number())
-                            _pianoRollTrackLabel->setText(preset.name);
-                    });
+                if (preset.bank == 0) addPreset(fontMenu, preset.name, preset.program);
             }
+            if (fontMenu->isEmpty()) fontMenu->menuAction()->setVisible(false);
+        }
+        // Keep the lesson usable when no compatible SoundFont is loaded.
+        if (_tutorialPanel && (!seenPrograms.contains(73) || seenPrograms.size() < 2)) {
+            auto *woodwinds = menu.addMenu(tr("Woodwinds"));
+            addPreset(woodwinds, tr("Flute"), 73);
+            addPreset(woodwinds, tr("Oboe"), 68);
         }
         if (menu.actions().isEmpty())
             menu.addAction(tr("No enabled SoundFont presets found"))->setEnabled(false);
@@ -942,7 +952,8 @@ MainWindow::MainWindow(QString initFile)
         _matrixWidgetContainer->update();
     };
     _arrangementWidget->seekTimeRequested = [this, seekArrangementTick](int ms) {
-        if (file) seekArrangementTick(file->tick(std::max(0, ms)));
+        if (file) seekArrangementTick(_arrangementWidget->snapTutorialTick(
+            file->tick(std::max(0, ms))));
     };
     mw_matrixWidget->commitRegionNotes = [this](int id, std::vector<xiv::OwnedRegionNote> notes,
                                                 const QString &description) {
@@ -1006,6 +1017,7 @@ MainWindow::MainWindow(QString initFile)
     trackHeaderLayout->setContentsMargins(0, 0, 0, 0);
     trackHeaderLayout->setSpacing(4);
     auto *addTrackButton = new QToolButton(trackHeaderActions);
+    addTrackButton->setObjectName(QStringLiteral("xivAddTrack"));
     addTrackButton->setDefaultAction(newTrack);
     addTrackButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     addTrackButton->setIconSize(QSize(14, 14));
@@ -1294,6 +1306,7 @@ MainWindow::MainWindow(QString initFile)
         return button;
     };
     auto *pianoRollAction = new QAction(tr("Piano Roll"), this);
+    pianoRollAction->setObjectName(QStringLiteral("xivPianoRollVisibility"));
     pianoRollAction->setCheckable(true);
     pianoRollAction->setChecked(true);
     connect(pianoRollAction, &QAction::toggled, this, [this, matrixArea, scrollBarArea, velocityArea](bool visible) {
@@ -1301,8 +1314,8 @@ MainWindow::MainWindow(QString initFile)
         scrollBarArea->setVisible(visible);
         velocityArea->setVisible(visible && _settings->value("control_widget_visible", true).toBool());
     });
-    addControl(_actionMap.value("undo"), true);
-    addControl(_actionMap.value("redo"), true);
+    addControl(_actionMap.value("undo"), true)->setObjectName(QStringLiteral("xivUndo"));
+    addControl(_actionMap.value("redo"), true)->setObjectName(QStringLiteral("xivRedo"));
     bar->addSpacing(6);
     addControl(inspectorAction);
     addControl(pianoRollAction);
@@ -1319,6 +1332,7 @@ MainWindow::MainWindow(QString initFile)
     addControl(_actionMap.value("back"), true);
     addControl(_actionMap.value("forward"), true);
     auto *stopButton = addControl(nullptr, true);
+    stopButton->setObjectName(QStringLiteral("xivStopOrBegin"));
     QAction *stopAction = _actionMap.value("stop");
     QAction *beginAction = _actionMap.value("back_to_begin");
     const auto currentStopAction = [stopAction, beginAction]() {
@@ -1407,6 +1421,8 @@ MainWindow::MainWindow(QString initFile)
         const QString label = zoomIn ? tr("Zoom in on Arrangement") : tr("Zoom out of Arrangement");
         button->setToolTip(label);
         button->setAccessibleName(label);
+        button->setObjectName(zoomIn ? QStringLiteral("xivArrangeZoomIn")
+                                     : QStringLiteral("xivArrangeZoomOut"));
         connect(button, &QToolButton::clicked, _arrangementWidget, [this, zoomIn]() {
             _arrangementWidget->zoomTimeline(zoomIn);
         });
@@ -1657,7 +1673,7 @@ MainWindow::MainWindow(QString initFile)
             close();
             return;
         }
-        if (!_settings->value("xiv/quick_start_seen", false).toBool()) {
+        if (!_tutorialPanel && !_settings->value("xiv/quick_start_seen", false).toBool()) {
             if (auto *quickStart = _actionMap.value("xiv_quick_start"))
                 quickStart->trigger();
         }
@@ -1803,6 +1819,8 @@ void MainWindow::loadInitFile() {
     auto *createEmpty = new QRadioButton(tr("Create a new empty project"), &startup);
     layout->addWidget(createEmpty);
     createEmpty->setChecked(true);
+    auto *tutorial = new QRadioButton(tr("Start the interactive tutorial"), &startup);
+    layout->addWidget(tutorial);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
                                          &startup);
@@ -1817,6 +1835,8 @@ void MainWindow::loadInitFile() {
             openFile(recentPath);
         else if (openExisting->isChecked())
             load();
+        else if (tutorial->isChecked())
+            startTutorial();
         else
             newFile();
     }
@@ -1847,6 +1867,7 @@ void MainWindow::scrollPositionsChanged(int startMs, int maxMs, int startLine,
 }
 
 void MainWindow::setFile(MidiFile *newFile) {
+    finishTutorial();
     // Store reference to old file for cleanup
     MidiFile *oldFile = this->file;
 
@@ -3557,7 +3578,7 @@ static bool channelUsedByAnotherTrack(MidiFile *file, MidiTrack *track, int chan
 void MainWindow::addTrack() {
     if (file) {
         TrackRenameDialog dialog(tr("New Track"), file->numTracks(), _settings, this,
-                                 enabledSoundFontPaths());
+                                 enabledSoundFontPaths(), _tutorialPanel != nullptr);
         dialog.setWindowTitle(tr("Add Track"));
         if (dialog.exec() == QDialog::Accepted && !dialog.name().trimmed().isEmpty()) {
             file->protocol()->startNewAction("Add Track");

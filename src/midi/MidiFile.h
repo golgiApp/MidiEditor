@@ -590,7 +590,7 @@ private:
     int timePerQuarter;
 
     /** \brief Array of MIDI channels (0-15 standard, 16-18 special) */
-    MidiChannel *channels[19];
+    MidiChannel *channels[19]{};
 
     /** \brief File path and basic properties */
     QString _path;
@@ -600,7 +600,7 @@ private:
     Protocol *prot;
 
     /** \brief Player data and state */
-    QMultiMap<int, MidiEvent *> *playerMap;
+    QMultiMap<int, MidiEvent *> *playerMap = nullptr;
     xiv::MidiRegionModel _regionLayout;
     // Cached source-coverage test: a trim or duplicate changes note output
     // even if the region's arrangement start has not moved.

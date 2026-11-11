@@ -939,6 +939,10 @@ private:
     MatrixWidget *mw_matrixWidget;
 
     /** Logic-inspired arrangement editor displayed above the Piano Roll. */
+    void startTutorial();
+    void finishTutorial();
+    QWidget *_tutorialPanel = nullptr;
+    QWidget *_tutorialOutline = nullptr;
     ArrangementWidget *_arrangementWidget = nullptr;
 
     /** \brief Container for the displayed matrix widget (OpenGL or software) */

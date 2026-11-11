@@ -110,6 +110,78 @@ public:
     const xiv::MidiRegionModel &regionModel() const { return _regions; }
     MidiFile *midiFile() const { return _file.data(); }
     int selectedRegionId() const { return _selectedRegionId; }
+    int lastCopiedRegionId() const { return _lastCopiedRegionId; }
+    void clearRegionSelection() {
+        const bool hadSelection = _selectedRegionId || !_selectedRegionIds.empty();
+        _selectedRegionId = 0;
+        _selectedRegionIds.clear();
+        _trackHeaderSelected = false;
+        if (hadSelection && regionViewChanged) regionViewChanged();
+        update();
+    }
+
+
+    // The tutorial points at the same geometry that the editor hit-tests.
+    QRect instrumentControlRect(int track) const {
+        return instrumentRect(rulerHeight() + track * laneHeight);
+    }
+    QRect muteSoloControlsRect(int track) const {
+        const int y = rulerHeight() + track * laneHeight;
+        return muteRect(y).united(soloRect(y));
+    }
+    QRect globalTracksControlRect() const {
+        return {0, _rulerTop, 140, measureRulerHeight};
+    }
+    QRect tempoTrackRect() const {
+        if (!_showGlobalTracks) return {};
+        return {0, _rulerTop + tempoTop(), width(), tempoLaneHeight};
+    }
+    QRect cycleControlRect() const {
+        return {headerWidth, _rulerTop, width() - headerWidth, cycleStripHeight};
+    }
+    QRect measureMarkerRect(int tick) const {
+        const int x = xForMs(_file->msOfTick(tick));
+        return QRect(x - 2, _rulerTop + cycleStripHeight + 1, 20,
+                     measureRulerHeight - cycleStripHeight - 2)
+            .intersected(QRect(headerWidth, _rulerTop, width() - headerWidth, measureRulerHeight));
+    }
+    QRect tutorialRegionRect(const xiv::MidiRegion &region) const {
+        const int left = xForMs(_file->msOfTick(region.startTick));
+        const int right = xForMs(_file->msOfTick(region.endTick()));
+        const int top = rulerHeight() + region.trackIndex * laneHeight + 6;
+        return QRect(left, top, right - left, laneHeight - 12)
+            .intersected(QRect(headerWidth, top, width() - headerWidth, laneHeight - 12));
+    }
+    QRect tutorialRegionEndRect(const xiv::MidiRegion &region, bool loopHandle) const {
+        const int left = xForMs(_file->msOfTick(region.startTick));
+        const int right = xForMs(_file->msOfTick(region.endTick()));
+        const int top = rulerHeight() + region.trackIndex * laneHeight + 6;
+        return loopHandle ? loopHandleRect(left, right, top)
+                          : QRect(right - 8, top + 24, 10, laneHeight - 36);
+    }
+
+    void revealTutorialTicks(int first, int last) {
+        if (!_file) return;
+        const int from = _file->msOfTick(first);
+        const int to = _file->msOfTick(last);
+        const int available = std::max(1, width() - headerWidth - 36);
+        if (to > from)
+            _scale = std::clamp(std::min(_scale, double(available) / (to - from)), 0.004, 0.7);
+        const int padding = int(16 / _scale);
+        setOriginMs(std::max(0, from - padding));
+        refreshHorizontalRange();
+        if (scrollTimeRequested) scrollTimeRequested(_originMs);
+        update();
+    }
+    void setTutorialSnapTick(int tick) { _tutorialSnapTick = tick; }
+    int snapTutorialTick(int tick) const {
+        if (_file && _tutorialSnapTick >= 0 &&
+            std::abs(xForMs(_file->msOfTick(tick)) -
+                     xForMs(_file->msOfTick(_tutorialSnapTick))) <= 8)
+            return _tutorialSnapTick;
+        return tick;
+    }
+
     bool canEditQuantize() const {
         return _file && _regionsReady && !MidiPlayer::isPlaying() && !MidiInput::recording();
     }
@@ -229,6 +301,8 @@ public:
 
     void setFile(MidiFile *file) {
         if (_file != file) {
+            _lastCopiedRegionId = 0;
+            _tutorialSnapTick = -1;
             _cycle = {};
             _cycleEnabled = false;
             _cycleDrag = CycleDrag::None;
@@ -1497,13 +1571,8 @@ protected:
                     _file->msOfTick(_file->arrangementEndTick()));
                 const int clampedMs = std::clamp(desiredMs, 0, endMs);
                 if (isLaneY(pos.y())) {
-                    const bool hadSelection = _selectedRegionId || !_selectedRegionIds.empty();
-                    _selectedRegionId = 0;
-                    _selectedRegionIds.clear();
-                    _trackHeaderSelected = false;
                     setFocus(Qt::MouseFocusReason);
-                    if (hadSelection && regionViewChanged) regionViewChanged();
-                    update();
+                    clearRegionSelection();
                     e->accept();
                     return;
                 }
@@ -2280,6 +2349,9 @@ private:
             lowTick + (target - loMs) * (highTick - lowTick))));
     }
     int snapTick(int tick) const {
+        const int tutorialTick = snapTutorialTick(tick);
+        if (tutorialTick != tick || (_tutorialSnapTick >= 0 && tick == _tutorialSnapTick))
+            return tutorialTick;
         if (!_snapToGrid || !_file) return std::max(0, tick);
         const int beatTicks = std::max(1, _file->ticksPerQuarter());
         const int64_t aligned = (static_cast<int64_t>(std::max(0, tick)) +
@@ -2660,6 +2732,8 @@ private:
     }
 
     xiv::RegionClipboard _regionClipboard;
+    int _lastCopiedRegionId = 0;
+    int _tutorialSnapTick = -1;
 
     bool regionClipboardShortcut(const QKeyEvent *event) const {
         return (_selectedRegionId && matchesCommand(event, QStringLiteral("copy"))) ||
@@ -2671,6 +2745,7 @@ private:
         if (!captureRegion(snapshot, id)) return;
         const auto *region = snapshot.find(id);
         _regionClipboard = {region->duration(), *region->ownedNotes, region->name};
+        _lastCopiedRegionId = id;
     }
 
     QRect _emptyRegionButton;

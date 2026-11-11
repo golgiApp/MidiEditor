@@ -36,7 +36,7 @@
 #include <QSettings>
 
 TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber, QSettings *settings, QWidget *parent,
-                                     const QStringList &soundFonts)
+                                     const QStringList &soundFonts, bool tutorial)
     : QDialog(parent), _settings(settings), _trackNumber(trackNumber) {
     
     setWindowTitle(tr("Set Track Name"));
@@ -51,7 +51,7 @@ TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber
     topLayout->addWidget(label);
     topLayout->addStretch();
 
-    if (!soundFonts.isEmpty() || GameSupportSettingsWidget::isFFXIVRenamePresetsEnabled(_settings)) {
+    if (!soundFonts.isEmpty() || tutorial || GameSupportSettingsWidget::isFFXIVRenamePresetsEnabled(_settings)) {
         _presetsButton = new QToolButton(this);
         _presetsButton->setIcon(QIcon(":/run_environment/graphics/channelwidget/instrument.png"));
         _presetsButton->setIconSize(QSize(20, 20));
@@ -78,6 +78,13 @@ TrackRenameDialog::TrackRenameDialog(const QString &currentName, int trackNumber
                     });
                 }
                 if (font->isEmpty()) font->menuAction()->setVisible(false);
+            }
+            if (tutorial && !seen.contains(58)) {
+                auto *brass = menu->addMenu(tr("Brass"));
+                auto *tuba = brass->addAction(tr("Tuba"));
+                tuba->setData(tr("Tuba"));
+                tuba->setProperty("program", 58);
+                connect(tuba, &QAction::triggered, this, &TrackRenameDialog::setPresetName);
             }
         } else {
             QList<FFXIVChannelFixer::InstrumentGroup> groups = FFXIVChannelFixer::ffxivInstrumentGroups();

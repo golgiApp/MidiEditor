@@ -36,7 +36,7 @@ class TrackRenameDialog : public QDialog {
 
 public:
     TrackRenameDialog(const QString &currentName, int trackNumber, QSettings *settings, QWidget *parent = nullptr,
-                      const QStringList &soundFonts = {});
+                      const QStringList &soundFonts = {}, bool tutorial = false);
 
     QString name() const;
     int program() const { return _program; }
