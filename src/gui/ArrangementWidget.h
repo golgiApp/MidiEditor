@@ -2507,22 +2507,19 @@ private:
         if (!anchor) return;
         const bool loop = _dragMode == RegionDragMode::Loop;
         const int delta = _moveProposedTick - (loop ? anchor->endTick() : anchor->startTick);
-        const auto blockedTracks = loop ? _regions.blockedLoopTracks(_selectedRegionIds, delta)
-                                        : std::set<int>{};
-        const bool moveValid = loop || _regions.canMoveSelected(_selectedRegionIds, delta);
+        const bool valid = loop || _regions.canMoveSelected(_selectedRegionIds, delta);
         p.save();
         p.setClipRect(QRect(headerWidth, rulerHeight(), width() - headerWidth, height() - rulerHeight()));
+        p.setBrush(valid ? QColor(47, 172, 109, 62) : QColor(170, 57, 65, 62));
+        p.setPen(QPen(QColor(valid ? "#70E4A0" : "#ED6977"), 2, Qt::DashLine));
         for (int id : _selectedRegionIds) {
             const auto *region = _regions.find(id);
             if (!region) continue;
-            const bool loopBlocked = blockedTracks.count(region->trackIndex);
-            const bool valid = moveValid && !loopBlocked;
-            p.setBrush(valid ? QColor(47, 172, 109, 62) : QColor(170, 57, 65, 62));
-            p.setPen(QPen(QColor(valid ? "#70E4A0" : "#ED6977"), 2, Qt::DashLine));
             const auto proposedStart = static_cast<int64_t>(region->startTick) + (loop ? 0 : delta);
             const int start = static_cast<int>(std::clamp<int64_t>(
                 proposedStart, 0, std::numeric_limits<int>::max()));
-            const auto end = static_cast<int64_t>(region->endTick()) + (loopBlocked ? 0 : delta);
+            const auto end = loop ? _regions.groupLoopEnd(*region, delta)
+                                  : static_cast<int64_t>(region->endTick()) + delta;
             const int left = std::max(headerWidth, xForMs(_file->msOfTick(start)));
             const int right = std::min(width() - 1, xForMs(_file->msOfTick(
                 static_cast<int>(std::clamp<int64_t>(end, start, std::numeric_limits<int>::max())))));

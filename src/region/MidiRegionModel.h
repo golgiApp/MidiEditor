@@ -193,27 +193,39 @@ public:
         }
         return false;
     }
-    std::set<int> blockedLoopTracks(const std::set<int> &ids, int delta) const {
-        std::set<int> blocked;
-        for (int id : ids) {
-            const auto *region = find(id);
-            if (!region || blocked.count(region->trackIndex)) continue;
-            const auto end = static_cast<int64_t>(region->endTick()) + delta;
-            if (end < 0 || end > std::numeric_limits<int>::max() ||
-                !canLoop(id, static_cast<int>(end))) blocked.insert(region->trackIndex);
+    int groupLoopEnd(const MidiRegion &region, int delta) const {
+        const int currentEnd = region.endTick();
+        if (delta == 0) return currentEnd;
+        const int baseEnd = region.startTick + region.duration();
+        int64_t limit = std::min<int64_t>(std::numeric_limits<int>::max(),
+            region.startTick + int64_t{10001} * region.duration() - 1);
+        for (const auto &other : _regions) {
+            if (other.id == region.id || other.trackIndex != region.trackIndex) continue;
+            if (other.startTick >= region.startTick) {
+                limit = std::min<int64_t>(limit, other.startTick);
+            } else if (other.endTick() > region.startTick) {
+                return currentEnd;
+            }
         }
-        return blocked;
+        const auto requestedEnd = std::max<int64_t>(baseEnd,
+            static_cast<int64_t>(currentEnd) + delta);
+        if (delta > 0) return static_cast<int>(std::max<int64_t>(
+            currentEnd, std::min(requestedEnd, limit)));
+        return requestedEnd <= limit ? static_cast<int>(requestedEnd) : currentEnd;
     }
     bool loopSelected(const std::set<int> &ids, int delta) {
         if (delta == 0) return false;
-        const auto blocked = blockedLoopTracks(ids, delta);
-        bool changed = false;
-        for (int id : ids) {
-            const auto *region = find(id);
-            if (region && !blocked.count(region->trackIndex))
-                changed |= loopTo(id, region->endTick() + delta);
+        std::vector<std::pair<MidiRegion *, int>> edits;
+        for (auto &region : _regions) {
+            if (!ids.count(region.id)) continue;
+            const int end = groupLoopEnd(region, delta);
+            if (end != region.endTick()) edits.emplace_back(&region, end);
         }
-        return changed;
+        for (const auto &[region, end] : edits) {
+            const int length = end - region->startTick;
+            region->loopLengthTicks = length == region->duration() ? 0 : length;
+        }
+        return !edits.empty();
     }
     bool clearLoop(int id) {
         for (auto &r : _regions) if (r.id == id && r.loopLengthTicks != 0) {

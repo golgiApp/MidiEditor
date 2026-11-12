@@ -25,16 +25,13 @@ static void testGroupMoveAndLoop() {
     assert(model.find(nextBass)->startTick == 230);
 
     const std::set<int> loopGroup{melody, bass, nextBass};
-    assert(model.blockedLoopTracks(loopGroup, 51) == std::set<int>{1});
+    assert(model.groupLoopEnd(*model.find(melody), 51) == 211);
+    assert(model.groupLoopEnd(*model.find(bass), 51) == 230);
     assert(model.loopSelected(loopGroup, 51));
     assert(model.find(melody)->endTick() == 211);
-    assert(model.find(bass)->endTick() == 180);
-    assert(model.find(nextBass)->endTick() == 290);
-    assert(!model.loopSelected({bass, nextBass}, 51));
-    assert(model.loopSelected({melody}, -51));
-    assert(model.loopSelected(group, 50));
-    assert(model.find(melody)->endTick() == 210);
     assert(model.find(bass)->endTick() == 230);
+    assert(model.find(nextBass)->endTick() == 341);
+    assert(!model.loopSelected({bass}, 51));
     const std::vector<xiv::SourceRegionNote> source = {
         {1, 0, 40, 90, 72, 100, 0}, {2, 1, 80, 130, 48, 100, 1}
     };
@@ -45,9 +42,13 @@ static void testGroupMoveAndLoop() {
     assert(std::count_if(notes.begin(), notes.end(), [bass](const auto &note) {
         return note.regionId == bass;
     }) == 2);
-    assert(model.loopSelected(group, -50));
+    assert(std::any_of(notes.begin(), notes.end(), [bass](const auto &note) {
+        return note.regionId == bass && note.endTick == 230;
+    }));
+    assert(model.loopSelected(loopGroup, -51));
     assert(model.find(melody)->loopLengthTicks == 0);
     assert(model.find(bass)->loopLengthTicks == 0);
+    assert(model.find(nextBass)->loopLengthTicks == 0);
 }
 
 int main() {
