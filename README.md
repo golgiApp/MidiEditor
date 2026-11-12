@@ -21,7 +21,7 @@ In the **Startup** window, select **Start the interactive tutorial** to open the
 - **Track instruments.** Add Track applies the chosen SoundFont preset immediately. The instrument menu marks the track’s current preset with a checkmark.
 - **Region creation.** Click empty space to clear the region selection. Hold **Ctrl** over empty space to preview a new region, then click to create it at the start of the hovered measure. The region extends up to four measures and stops at the next region if it starts sooner.
 - **Group region edits.** Shift-click to select multiple regions, then drag any selected region to move them along their tracks together. Drag the upper-right loop handle of any selected region to extend their loops. Each loop stops at the next region on its track, while loops with more room continue to extend. Each drag is one undo step.
-- **Piano Roll editing.** Preview note moves and resizes as you drag. Zoom in to reveal finer grid subdivisions. A click adds a note one visible grid cell long, and dragging sets a different length. Right-click selected notes for editing commands, or press **Backspace** to delete them while keeping the region.
+- **Piano Roll editing.** Preview note moves and resizes as you drag. The **Grid** starts on **Auto (recommended)**. Use **Ctrl+mouse wheel** to zoom horizontally and reveal finer subdivisions, down to sixteenth notes. Choose **1/4**, **1/8**, or **1/16** for a fixed grid at any zoom level. A click adds a note one grid cell long, and dragging sets a different length. Right-click selected notes for editing commands, or press **Backspace** to delete them while keeping the region.
 
 ## What's new in v0.3.4
 

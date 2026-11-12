@@ -21,6 +21,7 @@
 
 // Project includes
 #include "../region/MidiRegionRender.h"
+#include "PianoRollGrid.h"
 #include <optional>
 #include "PaintWidget.h"
 #include "Appearance.h"
@@ -123,6 +124,7 @@ public:
     void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
                        bool showAllRegions, bool navigate = false);
     void refreshRegionViewNotes();
+    void setPianoRollGridMode(xiv::PianoRollGridMode mode);
     std::function<void(xiv::MidiRegionModel, const QString &)> commitProjectedRegions;
     bool allTracksEditing() const { return _regionViewEnabled && _regionShowAll; }
     bool hasAllTracksSelection() const { return !_allSelection.empty(); }
@@ -799,7 +801,9 @@ private:
     const xiv::MidiRegion *editableRegion() const;
     QRect regionNoteRect(const xiv::RenderedRegionNote &note);
     int regionEditTick(int x);
-    int visibleGridStep(int start, int end);
+    int viewportTimeSpan() const;
+    xiv::PianoRollGridMode _pianoRollGridMode = xiv::PianoRollGridMode::Auto;
+    xiv::PianoRollGrid visibleGrid(int start, int end);
     std::pair<int, int> visibleGridCell(int tick);
     std::pair<int, int> noteEntryBounds(const QPoint &press, const QPoint &point, int limit);
     std::optional<std::vector<xiv::OwnedRegionNote>> regionGestureDraft(

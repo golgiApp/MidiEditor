@@ -19,6 +19,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QButtonGroup>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -402,6 +403,30 @@ MainWindow::MainWindow(QString initFile)
     _pianoRollTrackLabel->setStyleSheet(QStringLiteral("color:#C9D6E6; padding-left:12px;"));
     pianoHeaderLayout->addWidget(_pianoRollTrackLabel);
     pianoHeaderLayout->addStretch(1);
+
+    pianoHeaderLayout->addWidget(new QLabel(tr("Grid"), pianoHeader));
+    auto *gridButtons = new QButtonGroup(pianoHeader);
+    using GridMode = xiv::PianoRollGridMode;
+    const auto addGridButton = [&](GridMode mode, const QString &label, const QString &tooltip) {
+        auto *button = new QToolButton(pianoHeader);
+        button->setText(label);
+        button->setToolTip(tooltip);
+        button->setAccessibleName(tooltip);
+        button->setCheckable(true);
+        gridButtons->addButton(button, static_cast<int>(mode));
+        button->setChecked(mode == GridMode::Auto);
+        pianoHeaderLayout->addWidget(button);
+    };
+    addGridButton(GridMode::Auto, tr("Auto (recommended)"), tr("Automatically adjust the grid as you zoom"));
+    addGridButton(GridMode::Quarter, tr("1/4"), tr("Show a fixed quarter-note grid"));
+    addGridButton(GridMode::Eighth, tr("1/8"), tr("Show a fixed eighth-note grid"));
+    addGridButton(GridMode::Sixteenth, tr("1/16"), tr("Show a fixed sixteenth-note grid"));
+    connect(gridButtons, &QButtonGroup::idClicked, this, [this](int id) {
+        mw_matrixWidget->setPianoRollGridMode(static_cast<GridMode>(id));
+        _matrixWidgetContainer->update();
+    });
+    pianoHeaderLayout->addSpacing(8);
+
     _pianoRollShowSelectedButton = new QToolButton(pianoHeader);
     _pianoRollShowSelectedButton->setText(tr("Selected Region"));
     _pianoRollShowSelectedButton->setCheckable(true);

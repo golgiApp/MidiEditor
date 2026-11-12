@@ -91,6 +91,12 @@
 #include "../tool/SelectTool.h"
 #include "../tool/EventTool.h"
 
+namespace {
+constexpr double horizontalZoomStep = 1.2;
+constexpr double minimumHorizontalZoom = 0.1;
+constexpr double maximumHorizontalZoom = 64.0;
+}
+
 MatrixWidget::MatrixWidget(QSettings *settings, QWidget *parent)
     : PaintWidget(parent), _settings(settings) {
     screen_locked = false;
@@ -178,7 +184,7 @@ void MatrixWidget::timeMsChanged(int ms, bool ignoreLocked) {
 
     if (!screen_locked || ignoreLocked) {
         if (smoothScroll && (isPlaying || ignoreLocked)) {
-            int viewportDurationMs = ((width() - lineNameWidth) * 1000) / (PIXEL_PER_S * scaleX);
+            const int viewportDurationMs = viewportTimeSpan();
             int targetAnchorMs = viewportDurationMs * 0.20; // 20% from the left
             double targetStartTime = (double)ms - targetAnchorMs;
             if (targetStartTime < 0) targetStartTime = 0;
@@ -264,7 +270,7 @@ void MatrixWidget::scrollXChanged(int scrollPositionX) {
         return;
 
     startTimeX = scrollPositionX;
-    endTimeX = startTimeX + ((width() - lineNameWidth) * 1000) / (PIXEL_PER_S * scaleX);
+    endTimeX = startTimeX + viewportTimeSpan();
 
     if (startTimeX < 0) {
         endTimeX -= startTimeX;
@@ -644,11 +650,11 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                 pixpainter->setPen(_cachedMeasureTextColor);
                 pixpainter->drawText(textX, textY, text);
 
-                const int step = visibleGridStep(measureStartTick, tick);
+                const auto grid = visibleGrid(measureStartTick, tick);
                 QPen oldPen = pixpainter->pen();
                 pixpainter->setPen(QPen(_cachedTimelineGridColor, 1, Qt::DashLine));
-                for (int64_t div = static_cast<int64_t>(measureStartTick) + step; div < tick; div += step) {
-                    const int divTick = static_cast<int>(div);
+                for (int index = 1, divTick = grid.boundary(index); divTick < tick;
+                     divTick = grid.boundary(++index)) {
                     const int xDiv = xPosOfMs(msOfTick(divTick));
                     currentDivs.append(QPair<int, int>(xDiv, divTick));
                     pixpainter->drawLine(xDiv, timeHeight, xDiv, height());
@@ -1456,7 +1462,7 @@ void MatrixWidget::calcSizes() {
     }
     int time = std::max(file->maxTime(),
                         file->msOfTick(file->arrangementEndTick()));
-    int timeInWidget = ((width() - lineNameWidth) * 1000) / (PIXEL_PER_S * scaleX);
+    const int timeInWidget = viewportTimeSpan();
 
     // Timeline Ruler is always 50px
     int rulerHeight = 50;
@@ -1591,28 +1597,27 @@ QRect MatrixWidget::regionNoteRect(const xiv::RenderedRegionNote &note) {
                  std::max(1, static_cast<int>(lineHeight())));
 }
 
-int MatrixWidget::visibleGridStep(int start, int end) {
-    if (end <= start) return 1;
+void MatrixWidget::setPianoRollGridMode(xiv::PianoRollGridMode mode) {
+    if (_pianoRollGridMode == mode) return;
+    _pianoRollGridMode = mode;
+    registerRelayout();
+    update();
+}
+
+xiv::PianoRollGrid MatrixWidget::visibleGrid(int start, int end) {
     int numerator = 4, denominator = 2;
     file->meterAt(start, &numerator, &denominator);
-    int step = std::clamp((file->ticksPerQuarter() * 4) >> std::clamp(denominator, 0, 15),
-                          1, end - start);
-    const int left = xPosOfMs(msOfTick(start));
-    const auto wideEnough = [&](int ticks) {
-        return xPosOfMs(msOfTick(start + ticks)) - left >= 12;
-    };
-    if (!wideEnough(step)) return end - start;
-    while (step > 1 && step % 2 == 0 && wideEnough(step / 2)) step /= 2;
-    return step;
+    return xiv::choosePianoRollGrid(start, end, file->ticksPerQuarter(), denominator,
+        [this](int tick) { return xPosOfMs(msOfTick(tick)); }, _pianoRollGridMode);
 }
 
 std::pair<int, int> MatrixWidget::visibleGridCell(int tick) {
     int start = 0, end = 0;
     file->measure(tick, &start, &end);
-    const int step = visibleGridStep(start, end);
-    if (end <= start || tick < start || tick >= end) return {tick, tick};
-    const int left = start + (tick - start) / step * step;
-    return {left, static_cast<int>(std::min<int64_t>(end, static_cast<int64_t>(left) + step))};
+    const auto *signatures = file->timeSignatureEvents();
+    const auto nextSignature = signatures->upperBound(tick);
+    if (nextSignature != signatures->constEnd()) end = std::min(end, nextSignature.key());
+    return visibleGrid(start, end).cellAt(tick);
 }
 
 int MatrixWidget::regionEditTick(int x) {
@@ -2705,8 +2710,15 @@ void MatrixWidget::resizeEvent(QResizeEvent *event) {
     calcSizes();
 }
 
+int MatrixWidget::viewportTimeSpan() const {
+    return std::max(1, static_cast<int>((width() - lineNameWidth) * 1000.0 / (PIXEL_PER_S * scaleX)));
+}
+
 int MatrixWidget::xPosOfMs(int ms) {
-    return lineNameWidth + (ms - startTimeX) * (width() - lineNameWidth) / (endTimeX - startTimeX);
+    const auto offset = (static_cast<int64_t>(ms) - startTimeX) *
+        (width() - lineNameWidth) / std::max(1, endTimeX - startTimeX);
+    return static_cast<int>(std::clamp<int64_t>(lineNameWidth + offset,
+        std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
 }
 
 int MatrixWidget::yPosOfLine(int line) {
@@ -3545,15 +3557,15 @@ void MatrixWidget::resetView() {
 }
 
 void MatrixWidget::zoomHorIn() {
-    if (scaleX <= 3.0) { // Prevent excessive zoom in
-        scaleX += 0.1;
+    if (scaleX < maximumHorizontalZoom) {
+        scaleX = std::min(maximumHorizontalZoom, scaleX * horizontalZoomStep);
         calcSizes();
     }
 }
 
 void MatrixWidget::zoomHorOut() {
-    if (scaleX >= 0.2) {
-        scaleX -= 0.1;
+    if (scaleX > minimumHorizontalZoom) {
+        scaleX = std::max(minimumHorizontalZoom, scaleX / horizontalZoomStep);
         calcSizes();
     }
 }
