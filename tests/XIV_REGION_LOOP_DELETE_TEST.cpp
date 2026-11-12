@@ -3,7 +3,55 @@
 #include <cassert>
 #include <iostream>
 #include <vector>
+
+static void testGroupMoveAndLoop() {
+    xiv::MidiRegionModel model;
+    const int melody = model.addInitial(0, 20, 120);
+    const int bass = model.addInitial(1, 60, 140);
+    const int nextBass = model.addInitial(1, 230, 290);
+    const std::set<int> group{melody, bass};
+    assert(model.rename(bass, "Bass"));
+    assert(model.setQuantize(bass, {24, 75, 50}));
+
+    assert(!model.moveSelected(group, -21));
+    assert(model.find(melody)->startTick == 20);
+    assert(model.find(bass)->startTick == 60);
+    assert(model.moveSelected(group, 40));
+    assert(model.find(melody)->startTick == 60);
+    assert(model.find(bass)->startTick == 100);
+    assert(model.find(bass)->trackIndex == 1);
+    assert(model.find(bass)->name == "Bass");
+    assert(model.find(bass)->quantize.active());
+    assert(model.find(nextBass)->startTick == 230);
+
+    const std::set<int> loopGroup{melody, bass, nextBass};
+    assert(model.blockedLoopTracks(loopGroup, 51) == std::set<int>{1});
+    assert(model.loopSelected(loopGroup, 51));
+    assert(model.find(melody)->endTick() == 211);
+    assert(model.find(bass)->endTick() == 180);
+    assert(model.find(nextBass)->endTick() == 290);
+    assert(!model.loopSelected({bass, nextBass}, 51));
+    assert(model.loopSelected({melody}, -51));
+    assert(model.loopSelected(group, 50));
+    assert(model.find(melody)->endTick() == 210);
+    assert(model.find(bass)->endTick() == 230);
+    const std::vector<xiv::SourceRegionNote> source = {
+        {1, 0, 40, 90, 72, 100, 0}, {2, 1, 80, 130, 48, 100, 1}
+    };
+    const auto notes = xiv::renderRegionNotes(source, model);
+    assert(std::count_if(notes.begin(), notes.end(), [melody](const auto &note) {
+        return note.regionId == melody;
+    }) == 2);
+    assert(std::count_if(notes.begin(), notes.end(), [bass](const auto &note) {
+        return note.regionId == bass;
+    }) == 2);
+    assert(model.loopSelected(group, -50));
+    assert(model.find(melody)->loopLengthTicks == 0);
+    assert(model.find(bass)->loopLengthTicks == 0);
+}
+
 int main() {
+    testGroupMoveAndLoop();
     xiv::MidiRegionModel model;
     const int first = model.addInitial(0, 0, 100);
     assert(first != 0 && model.isManagedTrack(0));

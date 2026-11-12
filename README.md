@@ -20,6 +20,7 @@ In the **Startup** window, select **Start the interactive tutorial** to open the
 - **Standalone Save As.** Saving as a new `.mid` renders the arrangement into one MIDI file with the notes from every track, loop repeats, trims, assigned instruments, and tempo changes. You can reopen it on its own without a companion JSON file.
 - **Track instruments.** Add Track applies the chosen SoundFont preset immediately. The instrument menu marks the track’s current preset with a checkmark.
 - **Region creation.** Click empty space to clear the region selection. Hold **Ctrl** over empty space to preview a new region, then click to create it at the start of the hovered measure. The region extends up to four measures and stops at the next region if it starts sooner.
+- **Group region edits.** Shift-click to select multiple regions, then drag any selected region to move them along their tracks together. Drag the upper-right loop handle of any selected region to extend the loops by the same amount on every track with room. Tracks that run out of space keep their original loop lengths. Each drag is one undo step.
 - **Piano Roll editing.** Preview note moves and resizes as you drag. Zoom in to reveal finer grid subdivisions. A click adds a note one visible grid cell long, and dragging sets a different length. Right-click selected notes for editing commands, or press **Backspace** to delete them while keeping the region.
 
 ## What's new in v0.3.4

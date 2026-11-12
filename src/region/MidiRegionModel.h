@@ -193,6 +193,28 @@ public:
         }
         return false;
     }
+    std::set<int> blockedLoopTracks(const std::set<int> &ids, int delta) const {
+        std::set<int> blocked;
+        for (int id : ids) {
+            const auto *region = find(id);
+            if (!region || blocked.count(region->trackIndex)) continue;
+            const auto end = static_cast<int64_t>(region->endTick()) + delta;
+            if (end < 0 || end > std::numeric_limits<int>::max() ||
+                !canLoop(id, static_cast<int>(end))) blocked.insert(region->trackIndex);
+        }
+        return blocked;
+    }
+    bool loopSelected(const std::set<int> &ids, int delta) {
+        if (delta == 0) return false;
+        const auto blocked = blockedLoopTracks(ids, delta);
+        bool changed = false;
+        for (int id : ids) {
+            const auto *region = find(id);
+            if (region && !blocked.count(region->trackIndex))
+                changed |= loopTo(id, region->endTick() + delta);
+        }
+        return changed;
+    }
     bool clearLoop(int id) {
         for (auto &r : _regions) if (r.id == id && r.loopLengthTicks != 0) {
             r.loopLengthTicks = 0; return true;
@@ -250,6 +272,26 @@ public:
             [id](const auto &region) { return region.id == id; });
         it->startTick = newStartTick;
         std::rotate(it, it + 1, _regions.end());
+        return true;
+    }
+    bool canMoveSelected(const std::set<int> &ids, int delta) const {
+        if (ids.empty()) return false;
+        for (int id : ids) {
+            const auto *region = find(id);
+            if (!region) return false;
+            const auto start = static_cast<int64_t>(region->startTick) + delta;
+            if (start < 0 || start + region->displayDuration() >
+                std::numeric_limits<int>::max()) return false;
+        }
+        return true;
+    }
+    bool moveSelected(const std::set<int> &ids, int delta) {
+        if (delta == 0 || !canMoveSelected(ids, delta)) return false;
+        for (auto &region : _regions) {
+            if (ids.count(region.id)) region.startTick += delta;
+        }
+        std::stable_partition(_regions.begin(), _regions.end(),
+            [&ids](const auto &region) { return !ids.count(region.id); });
         return true;
     }
     // Move a time range across every track while preserving region order.

@@ -864,7 +864,9 @@ protected:
             }
         }
 
-        if (_regionDragging && _moveRegionId > 0) {
+        if (_regionDragging && groupRegionDrag()) {
+            paintGroupRegionDrag(p);
+        } else if (_regionDragging && _moveRegionId > 0) {
             const xiv::MidiRegion *moving = _regions.find(_moveRegionId);
             if (moving) {
                 const int target = _moveProposedTick;
@@ -1265,50 +1267,50 @@ protected:
                     });
                     if (next != regions.crend()) r = &*next;
                 }
-                if (add && _selectedRegionId) _selectedRegionIds.insert(_selectedRegionId);
-                if (add) {
+                const bool wasSelected = r->id == _selectedRegionId || _selectedRegionIds.count(r->id);
+                const bool canDrag = !MidiPlayer::isPlaying() && !MidiInput::recording();
+                const int left = xForMs(_file->msOfTick(r->startTick));
+                const int right = xForMs(_file->msOfTick(r->endTick()));
+                const bool leftHandle = left >= headerWidth && std::abs(pos.x() - left) <= 8;
+                const bool rightHandle = right < width() && std::abs(pos.x() - right) <= 8;
+                const int regionTop = rulerHeight() + row * laneHeight + 6;
+                const bool loopHandle = loopHandleRect(left, right, regionTop).contains(pos);
+                _dragMode = loopHandle ? RegionDragMode::Loop :
+                    add ? RegionDragMode::Move :
+                    e->modifiers().testFlag(Qt::ControlModifier) ? RegionDragMode::Duplicate :
+                    leftHandle ? RegionDragMode::TrimLeft :
+                    rightHandle ? RegionDragMode::TrimRight : RegionDragMode::Move;
+                const bool groupGesture = _dragMode == RegionDragMode::Move ||
+                                          _dragMode == RegionDragMode::Loop;
+                _deselectRegionOnClick = add && wasSelected && canDrag;
+                if (_deselectRegionOnClick) {
+                    _selectedRegionIds.insert(r->id);
+                    _selectedRegionId = r->id;
+                } else if (add) {
+                    if (_selectedRegionId) _selectedRegionIds.insert(_selectedRegionId);
                     if (!_selectedRegionIds.erase(r->id)) _selectedRegionIds.insert(r->id);
                     _selectedRegionId = _selectedRegionIds.count(r->id) ? r->id :
                         (_selectedRegionIds.empty() ? 0 : *_selectedRegionIds.begin());
                 } else {
-                    _selectedRegionIds = {r->id};
+                    if (!wasSelected || !canDrag || !groupGesture)
+                        _selectedRegionIds = {r->id};
                     _selectedRegionId = r->id;
                 }
-                if (!add && !MidiPlayer::isPlaying() && !MidiInput::recording()) {
+                if (canDrag) {
                     _regionPressed = true;
                     _regionDragging = false;
+                    _shiftRegionPress = add;
                     _moveRegionId = r->id;
                     _moveRow = row;
                     _movePreviewRow = row;
                     _movePressedY = pos.y();
                     _movePressedX = pos.x();
-                    _movePressedTick = timelineTickAt(pos.x());
-                    _moveOffsetTick = _movePressedTick - r->startTick;
-                    // Ctrl+drag copies the source material. Without Ctrl,
-                    // the first/last 8px are trim handles, not a region move.
-                    const int left = xForMs(_file->msOfTick(r->startTick));
-                    const int right = xForMs(_file->msOfTick(r->endTick()));
-                    const bool leftHandle = left >= headerWidth &&
-                        std::abs(pos.x() - left) <= 8;
-                    const bool rightHandle = right < width() &&
-                        std::abs(pos.x() - right) <= 8;
-                    const int regionTop = rulerHeight() + row * laneHeight + 6;
-                    const bool loopHandle = loopHandleRect(left, right, regionTop).contains(pos);
-                    _dragMode = loopHandle ? RegionDragMode::Loop :
-                        (e->modifiers() & Qt::ControlModifier) ? RegionDragMode::Duplicate :
-                        leftHandle ? RegionDragMode::TrimLeft :
-                        rightHandle ? RegionDragMode::TrimRight :
-                        RegionDragMode::Move;
+                    _moveOffsetTick = timelineTickAt(pos.x()) - r->startTick;
                     _moveProposedTick = (_dragMode == RegionDragMode::TrimRight ||
                                          _dragMode == RegionDragMode::Loop) ?
                         r->endTick() : r->startTick;
                 }
-                const auto *primary = _regions.find(_selectedRegionId);
-                MidiTrack *track = _file->tracks()->at(primary ? primary->trackIndex : row);
-                setSelectedTrack(track);
-                if (selectTrackRequested) selectTrackRequested(track);
-                if (regionViewChanged) regionViewChanged();
-                update();
+                refreshClickedRegionSelection(row);
                 e->accept();
                 return;
             }
@@ -1409,22 +1411,7 @@ protected:
                                Qt::SizeHorCursor : Qt::SizeAllCursor);
             }
             if (_regionDragging) {
-                const int mouseTick = timelineTickAt(pos.x());
-                // Moving and copying preserve the original mouse offset;
-                // trimming instead follows the dragged region edge exactly.
-                const int gridTick = snapTick(mouseTick);
-                _moveProposedTick =
-                    (_dragMode == RegionDragMode::Move ||
-                     _dragMode == RegionDragMode::Duplicate) ?
-                    std::max(0, snapTick(mouseTick - _moveOffsetTick)) : gridTick;
-                if (_dragMode == RegionDragMode::Move) {
-                    _movePreviewRow = isLaneY(pos.y()) ? (pos.y() - rulerHeight()) / laneHeight : -1;
-                    // A straight vertical drag preserves the exact starting tick.
-                    if (horizontalDistance < QApplication::startDragDistance()) {
-                        if (const auto *region = _regions.find(_moveRegionId))
-                            _moveProposedTick = region->startTick;
-                    }
-                }
+                updateRegionDragTarget(pos);
                 update();
             }
             e->accept();
@@ -1528,24 +1515,28 @@ protected:
         if (e->button() == Qt::LeftButton && _regionPressed) {
             const bool drag = _regionDragging;
             const int id = _moveRegionId;
+            const bool group = groupRegionDrag();
+            if (drag && (_dragMode == RegionDragMode::Move || group))
+                updateRegionDragTarget(e->position().toPoint());
             const int targetTick = _moveProposedTick;
             const int releaseRow = (int(e->position().y()) - rulerHeight()) / laneHeight;
             _regionPressed = false;
             _regionDragging = false;
             _moveRegionId = 0;
             unsetCursor();
-            if (drag && isLaneY(int(e->position().y())) &&
+            if (!drag && _deselectRegionOnClick) {
+                _selectedRegionIds.erase(id);
+                _selectedRegionId = _selectedRegionIds.empty() ? 0 : *_selectedRegionIds.begin();
+                refreshClickedRegionSelection(_moveRow);
+            } else if (!drag && group && !_shiftRegionPress) {
+                _selectedRegionIds = {id};
+                refreshClickedRegionSelection(_moveRow);
+            } else if (drag && group) {
+                if (isLaneY(int(e->position().y()))) commitGroupRegionDrag(id, targetTick);
+            } else if (drag && isLaneY(int(e->position().y())) &&
                 (_dragMode == RegionDragMode::Move || releaseRow == _moveRow)) {
                 switch (_dragMode) {
-                case RegionDragMode::Move: {
-                    const int x = int(e->position().x());
-                    if (const auto *region = _regions.find(id)) {
-                        const int start = std::abs(x - _movePressedX) < QApplication::startDragDistance()
-                            ? region->startTick : std::max(0, snapTick(timelineTickAt(x) - _moveOffsetTick));
-                        moveRegion(id, start, releaseRow);
-                    }
-                    break;
-                }
+                case RegionDragMode::Move: moveRegion(id, targetTick, releaseRow); break;
                 case RegionDragMode::Duplicate: duplicateRegion(id, targetTick); break;
                 case RegionDragMode::TrimLeft: trimRegionLeft(id, targetTick); break;
                 case RegionDragMode::TrimRight: trimRegionRight(id, targetTick); break;
@@ -2475,6 +2466,87 @@ private:
         finishRegionEdit(before, targets.size() == 1 ? tr("Split Region") : tr("Split Regions"));
     }
 
+    void refreshClickedRegionSelection(int row) {
+        const auto *primary = _regions.find(_selectedRegionId);
+        MidiTrack *track = _file->tracks()->at(primary ? primary->trackIndex : row);
+        setSelectedTrack(track);
+        if (selectTrackRequested) selectTrackRequested(track);
+        if (regionViewChanged) regionViewChanged();
+        update();
+    }
+
+    bool groupRegionDrag() const {
+        return _moveRegionId > 0 && _selectedRegionIds.size() > 1 &&
+            _selectedRegionIds.count(_moveRegionId) &&
+            (_dragMode == RegionDragMode::Move || _dragMode == RegionDragMode::Loop);
+    }
+
+    void updateRegionDragTarget(const QPoint &pos) {
+        const int mouseTick = timelineTickAt(pos.x());
+        if (_dragMode != RegionDragMode::Move && _dragMode != RegionDragMode::Duplicate) {
+            _moveProposedTick = snapTick(mouseTick);
+            return;
+        }
+        _moveProposedTick = snapTick(mouseTick - _moveOffsetTick);
+        if (_dragMode != RegionDragMode::Move) return;
+        _movePreviewRow = isLaneY(pos.y()) ? (pos.y() - rulerHeight()) / laneHeight : -1;
+        const auto *anchor = _regions.find(_moveRegionId);
+        if (!anchor) return;
+        if (std::abs(pos.x() - _movePressedX) < QApplication::startDragDistance())
+            _moveProposedTick = anchor->startTick;
+        if (groupRegionDrag()) {
+            int first = anchor->startTick;
+            for (int id : _selectedRegionIds)
+                if (const auto *region = _regions.find(id)) first = std::min(first, region->startTick);
+            _moveProposedTick = std::max(_moveProposedTick, anchor->startTick - first);
+        }
+    }
+
+    void paintGroupRegionDrag(QPainter &p) const {
+        const auto *anchor = _regions.find(_moveRegionId);
+        if (!anchor) return;
+        const bool loop = _dragMode == RegionDragMode::Loop;
+        const int delta = _moveProposedTick - (loop ? anchor->endTick() : anchor->startTick);
+        const auto blockedTracks = loop ? _regions.blockedLoopTracks(_selectedRegionIds, delta)
+                                        : std::set<int>{};
+        const bool moveValid = loop || _regions.canMoveSelected(_selectedRegionIds, delta);
+        p.save();
+        p.setClipRect(QRect(headerWidth, rulerHeight(), width() - headerWidth, height() - rulerHeight()));
+        for (int id : _selectedRegionIds) {
+            const auto *region = _regions.find(id);
+            if (!region) continue;
+            const bool loopBlocked = blockedTracks.count(region->trackIndex);
+            const bool valid = moveValid && !loopBlocked;
+            p.setBrush(valid ? QColor(47, 172, 109, 62) : QColor(170, 57, 65, 62));
+            p.setPen(QPen(QColor(valid ? "#70E4A0" : "#ED6977"), 2, Qt::DashLine));
+            const auto proposedStart = static_cast<int64_t>(region->startTick) + (loop ? 0 : delta);
+            const int start = static_cast<int>(std::clamp<int64_t>(
+                proposedStart, 0, std::numeric_limits<int>::max()));
+            const auto end = static_cast<int64_t>(region->endTick()) + (loopBlocked ? 0 : delta);
+            const int left = std::max(headerWidth, xForMs(_file->msOfTick(start)));
+            const int right = std::min(width() - 1, xForMs(_file->msOfTick(
+                static_cast<int>(std::clamp<int64_t>(end, start, std::numeric_limits<int>::max())))));
+            if (right <= left) continue;
+            const int top = rulerHeight() + region->trackIndex * laneHeight;
+            const QRect rect(QPoint(left, top + 7), QPoint(right, top + laneHeight - 7));
+            if (loop && valid) p.drawPath(loopOutline(rect, start, static_cast<int>(end), region->duration()));
+            else p.drawRect(rect);
+        }
+        p.restore();
+    }
+
+    void commitGroupRegionDrag(int id, int tick) {
+        if (!canEditQuantize()) return;
+        const auto *anchor = _regions.find(id);
+        if (!anchor) return;
+        const bool loop = _dragMode == RegionDragMode::Loop;
+        const int delta = tick - (loop ? anchor->endTick() : anchor->startTick);
+        auto updated = _regions;
+        const bool changed = loop ? updated.loopSelected(_selectedRegionIds, delta)
+                                  : updated.moveSelected(_selectedRegionIds, delta);
+        if (changed) installRegionNoteEdit(std::move(updated), loop ? tr("Loop Regions") : tr("Move Regions"));
+    }
+
     bool canPlaceMove(const xiv::MidiRegion &region, int start, int destination) const {
         const int trackCount = _file->tracks()->size();
         if (destination < 0 || destination >= trackCount) return false;
@@ -3057,7 +3129,8 @@ private:
     int _movePreviewRow = -1;
     int _movePressedY = 0;
     int _movePressedX = 0;
-    int _movePressedTick = 0;
+    bool _shiftRegionPress = false;
+    bool _deselectRegionOnClick = false;
     int _moveOffsetTick = 0;
     int _moveProposedTick = 0;
     int _dragX = 0;
