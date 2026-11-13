@@ -10,7 +10,6 @@
 
 #include <QAction>
 #include <QApplication>
-#include <QDockWidget>
 #include <QFile>
 #include <QFont>
 #include <QHBoxLayout>
@@ -21,6 +20,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <array>
 
 namespace {
@@ -36,6 +36,45 @@ struct Prompt {
     QString instruction;
     QString hint;
 };
+
+QRect tutorialCardRect(const QRect &workspace, const QSize &size, const QRect &target,
+                       bool preferCenter) {
+    constexpr int gap = 12;
+    const QRect available = workspace.adjusted(gap, gap, -gap, -gap);
+    const auto at = [&](QPoint topLeft) {
+        topLeft.setX(std::clamp(topLeft.x(), available.left(),
+                               std::max(available.left(), available.right() - size.width() + 1)));
+        topLeft.setY(std::clamp(topLeft.y(), available.top(),
+                               std::max(available.top(), available.bottom() - size.height() + 1)));
+        return QRect(topLeft, size);
+    };
+    const QRect centered = at(available.center() - QPoint(size.width() / 2, size.height() / 2));
+    if (target.isEmpty() || (preferCenter && !centered.intersects(target))) return centered;
+
+    const std::array<QPoint, 4> positions{{
+        {target.right() + gap + 1, target.top()},
+        {target.left(), target.bottom() + gap + 1},
+        {target.left() - size.width() - gap, target.top()},
+        {target.left(), target.top() - size.height() - gap}
+    }};
+    for (const QPoint &pos : positions) {
+        const QRect candidate = at(pos);
+        if (!candidate.intersects(target)) return candidate;
+    }
+    if (!centered.intersects(target)) return centered;
+
+    // A large region can fill most of the view. Use the edge with the
+    // smallest overlap so as much of the editing area as possible stays usable.
+    QRect best = centered;
+    for (const QPoint &pos : positions) {
+        const QRect candidate = at(pos);
+        const QRect overlap = candidate.intersected(target);
+        const QRect bestOverlap = best.intersected(target);
+        if (overlap.width() * overlap.height() < bestOverlap.width() * bestOverlap.height())
+            best = candidate;
+    }
+    return best;
+}
 }
 
 void MainWindow::startTutorial() {
@@ -63,41 +102,40 @@ void MainWindow::startTutorial() {
         pianoRoll->setChecked(true);
 
     auto *central = centralWidget();
-    auto *dock = new QDockWidget(tr("Tutorial"), this);
-    dock->setAllowedAreas(Qt::TopDockWidgetArea);
-    dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
-    auto *titleBar = new QWidget(dock);
-    titleBar->setFixedHeight(0);
-    dock->setTitleBarWidget(titleBar);
-
-    auto *panel = new QWidget(dock);
+    auto *panel = new QWidget(central);
     panel->setObjectName(QStringLiteral("xivTutorial"));
+    panel->setAttribute(Qt::WA_StyledBackground);
     panel->setStyleSheet(QStringLiteral(
-        "QWidget#xivTutorial { background:#222b37; border-bottom:1px solid #62788f; }"
-        "QWidget#xivTutorial QLabel { color:#eef5ff; background:transparent; }"));
-    _tutorialPanel = dock;
-    auto *layout = new QHBoxLayout(panel);
-    layout->setContentsMargins(12, 7, 12, 7);
-    auto *copy = new QVBoxLayout();
-    copy->setSpacing(2);
+        "QWidget#xivTutorial { background:#222b37; border:1px solid #62788f; border-radius:8px; }"
+        "QWidget#xivTutorial QLabel { color:#eef5ff; background:transparent; }"
+        "QWidget#xivTutorial QLabel#xivTutorialProgress { color:#a9bfd5; }"));
+    _tutorialPanel = panel;
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(16, 12, 16, 12);
+    layout->setSpacing(7);
+    auto *progress = new QLabel(panel);
+    progress->setObjectName(QStringLiteral("xivTutorialProgress"));
     auto *heading = new QLabel(panel);
     QFont font = heading->font();
     font.setBold(true);
     heading->setFont(font);
+    heading->setWordWrap(true);
     auto *instruction = new QLabel(panel);
     instruction->setWordWrap(true);
-    instruction->setMinimumWidth(300);
-    copy->addWidget(heading);
-    copy->addWidget(instruction);
-    layout->addLayout(copy, 1);
+    layout->addWidget(progress);
+    layout->addWidget(heading);
+    layout->addWidget(instruction);
+    auto *actions = new QHBoxLayout;
     auto *hint = new QPushButton(tr("Hint"), panel);
     hint->setCheckable(true);
     auto *next = new QPushButton(panel);
     auto *exit = new QPushButton(tr("Exit Tutorial"), panel);
-    layout->addWidget(hint);
-    layout->addWidget(next);
-    layout->addWidget(exit);
-    dock->setWidget(panel);
+    for (auto *button : {hint, next, exit}) button->setFocusPolicy(Qt::TabFocus);
+    actions->addWidget(exit);
+    actions->addStretch();
+    actions->addWidget(hint);
+    actions->addWidget(next);
+    layout->addLayout(actions);
 
     auto *outline = new QWidget(central);
     outline->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -159,19 +197,16 @@ void MainWindow::startTutorial() {
         {tr("Cycle playback"), tr("Drag across the thin cycle strip above the measure numbers to repeat a time range during playback."), {}}
     }};
 
-    const auto showPrompt = [heading, instruction, hint, prompts](Step step) {
+    const auto showPrompt = [progress, heading, instruction, hint, prompts](Step step) {
         const int index = static_cast<int>(step);
         const auto &prompt = prompts[index];
-        heading->setText(tr("Step %1 of %2   -   %3").arg(index + 1).arg(prompts.size()).arg(prompt.title));
-        instruction->setText(hint->isChecked() ? prompt.hint : prompt.instruction);
+        progress->setText(tr("Step %1 of %2").arg(index + 1).arg(prompts.size()));
+        heading->setText(prompt.title);
+        instruction->setText(hint->isChecked() && !prompt.hint.isEmpty() ? prompt.hint : prompt.instruction);
         hint->setVisible(!prompt.hint.isEmpty());
     };
-    // Paint the first instruction as soon as the tutorial opens, including
-    // while the editor is still closing the startup dialog.
     showPrompt(Step::Instrument);
     next->hide();
-    addDockWidget(Qt::TopDockWidgetArea, dock);
-    dock->show();
 
     // This state lives with the coaching panel and is discarded when the project changes.
     auto *timer = new QTimer(panel);
@@ -203,11 +238,11 @@ void MainWindow::startTutorial() {
     });
 
     connect(timer, &QTimer::timeout, panel,
-        [this, dock, panel, central, outline, arrangement, area, demo, flute, drums,
+        [this, panel, layout, central, outline, arrangement, area, demo, flute, drums,
          showPrompt, hint, next, splitTick, crossesSplit, loopEnd, pasteTick, trimTick, pastedEnd,
          step = Step::Instrument, shown = Step::Done, tuba = QPointer<MidiTrack>(),
          heard = false]() mutable {
-        if (_tutorialPanel != dock || file != demo) return;
+        if (_tutorialPanel != panel || file != demo) return;
         if (QApplication::activeModalWidget() || QApplication::activePopupWidget()) return;
 
         const auto &regions = arrangement->regionModel().regions();
@@ -461,6 +496,9 @@ void MainWindow::startTutorial() {
         }
         if (!target.isEmpty()) {
             target.moveTopLeft(central->mapFromGlobal(target.topLeft()));
+            target = target.intersected(central->rect());
+        }
+        if (!target.isEmpty()) {
             outline->setGeometry(target.adjusted(-2, -2, 2, 2).intersected(central->rect()));
             outline->show();
             outline->raise();
@@ -474,6 +512,26 @@ void MainWindow::startTutorial() {
         next->setEnabled(step >= Step::Tempo || heard || playRequested);
         next->setText(step == Step::Cycle ? tr("Finish Tutorial")
                        : nowListening ? tr("Continue") : tr("Next"));
+
+        QRect editingArea = target;
+        if (step == Step::Move && tubaIndex >= 0 && opening) {
+            QRect destination = arrangeRect(arrangement->tutorialRegionRect(*opening).translated(
+                0, (tubaIndex - fluteIndex) * ArrangementWidget::laneHeight));
+            if (!destination.isEmpty()) {
+                destination.moveTopLeft(central->mapFromGlobal(destination.topLeft()));
+                editingArea = editingArea.united(destination.intersected(central->rect()));
+            }
+        } else if (step == Step::OctaveOne || step == Step::OctaveTwo) {
+            // The user selects pitches on the keys and opens the note menu
+            // in the grid, so keep the card away from both.
+            editingArea = QRect(_matrixWidgetContainer->mapTo(central, QPoint()),
+                                _matrixWidgetContainer->size()).intersected(central->rect());
+        }
+        const int cardWidth = std::min(420, std::max(1, central->width() - 24));
+        const QSize cardSize(cardWidth, layout->totalHeightForWidth(cardWidth));
+        panel->setGeometry(tutorialCardRect(central->rect(), cardSize, editingArea, nowListening));
+        panel->show();
+        panel->raise();
     });
     timer->start();
 }
