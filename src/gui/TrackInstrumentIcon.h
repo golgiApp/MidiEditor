@@ -118,20 +118,32 @@ inline void drawTrackInstrumentIcon(QPainter &p, int program) {
         shape.quadTo(11, 3, 8, 3);
         p.drawPath(shape);
         break;
-    case 65: case 66: case 67: case 64:
-        shape.moveTo(12, -13);
-        shape.quadTo(0, -20, -3, -8);
-        shape.lineTo(-7, 8);
-        shape.quadTo(-7, 12, -4, 12);
-        shape.quadTo(1, 12, 1, 7);
-        shape.lineTo(1, 2);
-        shape.lineTo(12, 2);
-        shape.lineTo(10, 9);
-        shape.cubicTo(8, 20, -16, 21, -13, 8);
-        shape.lineTo(-7, -9);
-        shape.quadTo(-2, -22, 13, -16);
+    case 64: case 65: case 66: case 67: {
+        p.rotate(-18);
+        // S-shaped neck, long keyed body and a J-shaped bow.
+        shape.moveTo(5, -15);
+        shape.cubicTo(0, -18, -7, -17, -7, -11);
+        shape.lineTo(-7, 7);
+        shape.cubicTo(-7, 18, 8, 18, 8, 7);
+        shape.lineTo(8, 2);
+        p.setPen(QPen(ink, 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p.drawPath(shape);
+        p.drawLine(QPointF(4, -15.5), QPointF(8, -13.5));
+        QPainterPath bell;
+        bell.moveTo(6, 5);
+        bell.cubicTo(6, 0, 4, -3, 3, -5);
+        bell.lineTo(15, -3);
+        bell.quadTo(11, -1, 10, 6);
+        bell.closeSubpath();
+        p.fillPath(bell, ink);
+        p.setPen(outline);
+        p.setBrush(p.background().color());
+        p.drawEllipse(QRectF(2, -7, 14, 4.5));
+        p.setBrush(ink);
+        p.setPen(Qt::NoPen);
+        for (int y : {-7, -2, 3, 8}) p.drawEllipse(QPointF(-3.5, y), 1.15, 1.15);
         break;
+    }
     case 68: case 69: case 70: case 71: case 72: case 73: case 74:
         p.rotate(-38);
         p.drawRoundedRect(QRectF(-17, -2.2, 34, 4.4), 1, 1);

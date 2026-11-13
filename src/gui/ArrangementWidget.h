@@ -3288,6 +3288,7 @@ private:
         case TrackControl::Instrument:
             p.save();
             p.translate(-2, -3);
+            p.setBackground(QBrush(QColor("#344252")));
             xiv::drawTrackInstrumentIcon(p, program);
             p.restore();
             p.drawPolyline(QPolygonF{QPointF(13, 15), QPointF(17, 19), QPointF(21, 15)});

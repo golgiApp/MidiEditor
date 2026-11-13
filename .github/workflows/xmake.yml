@@ -260,11 +260,7 @@ jobs:
           Remove-Item -Path ./fluidsynth/bin/concrt*.dll -ErrorAction SilentlyContinue
           cp ./fluidsynth/bin/*.dll $data/
           New-Item -ItemType Directory -Force -Path "$data/soundfonts" | Out-Null
-          if (Test-Path "./soundfonts/FFXIV Standard.sf2") {
-            Copy-Item "./soundfonts/FFXIV Standard.sf2" "$data/soundfonts/FFXIV Standard.sf2"
-          } else {
-            Write-Host "No bundled SF2 found; building installer without a default SoundFont."
-          }
+          Copy-Item -LiteralPath "./soundfonts/FFXIV Standard.sf2" -Destination "$data/soundfonts/FFXIV Standard.sf2" -ErrorAction Stop
           mkdir ./packaging/org.midieditor.manual/data/
           cp -Recurse -Path ./manual/ -Destination ./packaging/org.midieditor.manual/data/
 

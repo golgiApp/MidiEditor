@@ -10,6 +10,26 @@
 #include <QString>
 #include <QtEndian>
 struct XIVSoundFontPreset { QString name; int program; int bank; };
+inline QString xivSoundFontPresetDisplayName(const QString &name, int program, int bank) {
+    if (bank != 0) return name;
+    // The full in-game labels exceed the SoundFont's 20-byte name field.
+    // Match the known names and program so unrelated SoundFonts keep their labels.
+    struct GuitarPreset { const char *legacy; const char *compact; const char *variant; };
+    static constexpr GuitarPreset guitars[] = {
+        {"Clean Guitar", "E.Guitar: Clean", "Clean"},
+        {"Muted Guitar", "E.Guitar: Muted", "Muted"},
+        {"Overdriven Guitar", "E.Guitar: Overdrive", "Overdriven"},
+        {"Power Chords Guitar", "E.Guitar: Power Chd", "Power Chords"},
+        {"Special Guitar", "E.Guitar: Special", "Special"},
+    };
+    if (program >= 27 && program <= 31) {
+        const auto &preset = guitars[program - 27];
+        if (name == QLatin1String(preset.legacy) || name == QLatin1String(preset.compact))
+            return QStringLiteral("Electric Guitar: %1").arg(QLatin1String(preset.variant));
+    }
+    return name;
+}
+
 inline QVector<XIVSoundFontPreset> xivReadSoundFontPresets(const QString &path) {
     QVector<XIVSoundFontPreset> result;
     QFile f(path);
@@ -39,7 +59,8 @@ inline QVector<XIVSoundFontPreset> xivReadSoundFontPresets(const QString &path) 
                         const QString name = QString::fromLatin1(raw.constData(), raw.indexOf('\0') < 0 ? 20 : raw.indexOf('\0')).trimmed();
                         const int program = u16(at + 20), bank = u16(at + 22);
                         if (!name.isEmpty() && program <= 127 && bank <= 16383)
-                            result.append({name, program, bank});
+                            result.append({xivSoundFontPresetDisplayName(name, program, bank),
+                                           program, bank});
                     }
                     return result;
                 }
