@@ -108,13 +108,13 @@ void MainWindow::startTutorial() {
     outline->hide();
 
     const std::array<Prompt, static_cast<int>(Step::Done)> prompts{{
-        {tr("Try an instrument"), tr("Click the keyboard dropdown on the Flute track and choose another instrument."),
-         tr("The keyboard button is below the track name. Load a SoundFont in MIDI setup to hear the XIV instrument sounds.")},
+        {tr("Try an instrument"), tr("Click the instrument icon at the far left of the Flute track header and choose another instrument."),
+         tr("The small down arrow marks the instrument picker. Load a SoundFont in MIDI setup to hear the XIV instrument sounds.")},
         {tr("Hear the new instrument"), tr("Click Play to hear the same melody with the new instrument."),
          tr("The track name changes with the preset. If audio is unavailable, you can continue after trying Play.")},
-        {tr("Return to Flute"), tr("Open the same keyboard dropdown and choose Flute again."),
+        {tr("Return to Flute"), tr("Click the instrument icon on the same track and choose Flute again."),
          tr("The track should return to the original Flute sound before you add Tuba.")},
-        {tr("Add a Tuba track"), tr("Click + Add Track. Open the keyboard dropdown, choose Tuba, then click Accept."),
+        {tr("Add a Tuba track"), tr("Click + Add Track. In the Add Track dialog, click the preset button beside Track Name, choose Tuba, then click Accept."),
          tr("Look under Brass or the loaded SoundFont's name. Choose the preset so the track gets the Tuba sound.")},
         {tr("Move the playhead"), tr("Click measure 5 on the Arrangement timeline ruler."),
          tr("Click the measure number below the cycle strip.")},
@@ -151,10 +151,11 @@ void MainWindow::startTutorial() {
         {tr("Hear the Bass Drum"), tr("The Bass Drum is unmuted. Click Play to hear the adjusted part, then click Continue."),
          tr("The GM pitches were too low for the XIV part. Transposing the remaining notes puts them in range.")},
         {tr("Arrangement and Tempo"), tr("Global Tracks above the track headers opens the Tempo lane, where you can see changes in speed."), {}},
-        {tr("Piano Roll views"), tr("Selected Region shows the region you clicked. All Tracks shows the notes across the full arrangement."), {}},
+        {tr("Piano Roll views"), tr("Selected Region shows the region you clicked. All Tracks shows the notes across the full arrangement."),
+         tr("In the Grid row, Auto (recommended) adjusts the grid as you zoom. Choose 1/4, 1/8, or 1/16 for a fixed grid.")},
         {tr("Undo and Redo"), tr("Use these two buttons in the top bar to reverse or reapply an edit."), {}},
         {tr("Arrangement zoom"), tr("Use the zoom buttons on the right of the top bar to see more detail or more of the song."), {}},
-        {tr("Mute and Solo"), tr("On each track header, the speaker mutes the track and the headphones let you hear it in isolation."), {}},
+        {tr("Mute and Solo"), tr("In the buttons at the lower right of each track header, click the speaker to mute or unmute the track. Click the headphones to solo it."), {}},
         {tr("Cycle playback"), tr("Drag across the thin cycle strip above the measure numbers to repeat a time range during playback."), {}}
     }};
 

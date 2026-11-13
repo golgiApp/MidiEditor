@@ -11,6 +11,7 @@
 #include <QWidget>
 #include <QPainter>
 #include <QPainterPath>
+#include "TrackInstrumentIcon.h"
 #include <QMouseEvent>
 #include <QHoverEvent>
 #include <QContextMenuEvent>
@@ -740,17 +741,21 @@ protected:
             p.setFont(QFont(QStringLiteral("Segoe UI"), 11, QFont::DemiBold));
             p.setPen(QColor("#F4F7FD"));
             QFontMetrics fm(p.font());
-            p.drawText(14, y + 24, fm.elidedText(name, Qt::ElideRight, headerWidth - 28));
+            const int textLeft = instrumentRect(y).right() + 10;
+            p.drawText(textLeft, y + 24,
+                       fm.elidedText(name, Qt::ElideRight, headerWidth - textLeft - 12));
             p.setFont(QFont(QStringLiteral("Segoe UI"), 9));
             p.setPen(QColor("#ACBACD"));
             // ASCII delimiters avoid mojibake on MSVC installations with a
             // legacy source character set (previously rendered as 'A' + junk).
             const int channel = t->assignedChannel();
-            p.drawText(14, y + 44, tr("Track %1   |   Channel %2")
+            p.drawText(textLeft, y + 44, tr("Track %1   |   Channel %2")
                        .arg(i + 1).arg(channel >= 0 && channel < 16
                             ? QString::number(channel + 1) : tr("Unassigned")));
 
-            drawButton(p, instrumentRect(y), TrackControl::Instrument, false, QColor("#45647F"));
+            const int program = channel >= 0 && channel < 16
+                ? _file->channel(channel)->progAtTick(_file->cursorTick()) : -1;
+            drawButton(p, instrumentRect(y), TrackControl::Instrument, false, QColor("#45647F"), program);
             drawButton(p, visibilityRect(y), TrackControl::Visibility, !t->hidden(), QColor("#1767A4"));
             drawButton(p, muteRect(y), TrackControl::Mute, t->muted(), QColor("#A83C4B"));
             drawButton(p, soloRect(y), TrackControl::Solo, t == _solo, QColor("#9B761D"));
@@ -3264,13 +3269,13 @@ private:
     int xForMs(int ms) const { return headerWidth + int((ms - _originMs) * _scale); }
     enum class TrackControl { Instrument, Visibility, Mute, Solo, More };
     // The same rectangles are used for painting, hit testing, and tooltips.
-    QRect instrumentRect(int y) const { return QRect(13, y + 49, 43, 24); }
-    QRect visibilityRect(int y) const { return QRect(61, y + 49, 29, 24); }
-    QRect muteRect(int y) const { return QRect(95, y + 49, 29, 24); }
-    QRect soloRect(int y) const { return QRect(129, y + 49, 29, 24); }
-    QRect actionsRect(int y) const { return QRect(163, y + 49, 66, 24); }
+    QRect instrumentRect(int y) const { return QRect(13, y + 14, 55, 55); }
+    QRect visibilityRect(int y) const { return QRect(headerWidth - 149, y + 52, 29, 24); }
+    QRect muteRect(int y) const { return QRect(headerWidth - 115, y + 52, 29, 24); }
+    QRect soloRect(int y) const { return QRect(headerWidth - 81, y + 52, 29, 24); }
+    QRect actionsRect(int y) const { return QRect(headerWidth - 47, y + 52, 35, 24); }
     static void drawButton(QPainter &p, const QRect &r, TrackControl control,
-                           bool active, const QColor &accent) {
+                           bool active, const QColor &accent, int program = -1) {
         p.save();
         p.setRenderHint(QPainter::Antialiasing);
         p.setPen(QPen(active ? accent.lighter(145) : QColor("#62748A"), 1));
@@ -3281,11 +3286,11 @@ private:
         p.translate(r.center());
         switch (control) {
         case TrackControl::Instrument:
-            p.drawRect(QRectF(-13, -6, 15, 12));
-            p.drawLine(QPointF(-8, -6), QPointF(-8, 6));
-            p.drawLine(QPointF(-3, -6), QPointF(-3, 6));
-            p.drawLine(QPointF(7, -1), QPointF(10, 2));
-            p.drawLine(QPointF(10, 2), QPointF(13, -1));
+            p.save();
+            p.translate(-2, -3);
+            xiv::drawTrackInstrumentIcon(p, program);
+            p.restore();
+            p.drawPolyline(QPolygonF{QPointF(13, 15), QPointF(17, 19), QPointF(21, 15)});
             break;
         case TrackControl::Visibility: {
             QPainterPath eye;
