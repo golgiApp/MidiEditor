@@ -993,7 +993,7 @@ protected:
             p.setBrush(QColor(72, 129, 167, 105));
             p.drawRoundedRect(preview.adjusted(0, 0, -1, -1), 4, 4);
             p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
-            const QString hint = tr("+  Shift+click to add region");
+            const QString hint = tr("Shift+click to add region");
             const int hintWidth = std::min(width() - headerWidth,
                 p.fontMetrics().horizontalAdvance(hint) + 12);
             QRect hintRect = preview;
