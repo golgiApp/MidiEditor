@@ -12,6 +12,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
+#include <QHoverEvent>
 #include <QContextMenuEvent>
 #include <QPoint>
 #include <QPair>
@@ -62,6 +63,7 @@
 #include <functional>
 #include <algorithm>
 #include <limits>
+#include <optional>
 
 #include "../midi/MidiFile.h"
 #include "../midi/MidiPlayer.h"
@@ -87,6 +89,7 @@ public:
     explicit ArrangementWidget(QWidget *parent = nullptr) : QWidget(parent) {
         setMinimumHeight(130);
         setMouseTracking(true);
+        setAttribute(Qt::WA_Hover);
         setFocusPolicy(Qt::ClickFocus);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     }
@@ -279,13 +282,6 @@ public:
         finishRegionEdit(before, description);
     }
 
-    void refreshRegionCreationPreview(bool controlDown) {
-        const auto global = QCursor::pos();
-        const bool hovering = isVisible() && QApplication::widgetAt(global) == this;
-        updateEmptyRegionHover(mapFromGlobal(global),
-                               controlDown && hovering ? Qt::ControlModifier : Qt::NoModifier);
-    }
-
     void zoomTimeline(bool zoomIn) {
         if (!_file) return;
         zoomTimelineAt(zoomIn, headerWidth + std::max(0, width() - headerWidth) / 2);
@@ -311,7 +307,6 @@ public:
         _file = file;
         _selected = nullptr;
         _trackHeaderSelected = false;
-        _emptyRegionButton = {};
         _preview.clear();
         _regions.clear();
         _sections.clear();
@@ -332,6 +327,7 @@ public:
         _hoverRow = -1;
         _dragging = false;
         _timelinePressed = false;
+        _playheadDragging = false;
         _regionPressed = false;
         _regionDragging = false;
         _moveRegionId = 0;
@@ -595,6 +591,15 @@ public:
 
 protected:
     bool event(QEvent *e) override {
+        // Hover events also repaint on entry and exit, independently of drag
+        // handlers that consume mouse moves. Use the current layout on paint.
+        if (e->type() == QEvent::HoverEnter || e->type() == QEvent::HoverMove) {
+            _regionHoverGlobal = static_cast<QHoverEvent *>(e)->globalPosition().toPoint();
+            update();
+        } else if (e->type() == QEvent::HoverLeave) {
+            _regionHoverGlobal.reset();
+            update();
+        }
         // Keep region shortcuts local to the Arrangement. Ctrl+T still
         // handles transposition elsewhere.
         if (e->type() == QEvent::ShortcutOverride) {
@@ -980,14 +985,29 @@ protected:
             }
             p.restore();
         }
-        if (!_emptyRegionButton.isEmpty() && canEditQuantize()) {
+        const QRect preview = _regionHoverGlobal && QApplication::mouseButtons() == Qt::NoButton
+            ? emptyRegionPreviewAt(mapFromGlobal(*_regionHoverGlobal)) : QRect{};
+        if (!preview.isEmpty()) {
             p.save();
             p.setPen(QColor("#9BCDF1"));
             p.setBrush(QColor(72, 129, 167, 105));
-            p.drawRoundedRect(_emptyRegionButton, 4, 4);
-            const QPoint center = _emptyRegionButton.center();
-            p.drawLine(center + QPoint(-4, 0), center + QPoint(4, 0));
-            p.drawLine(center + QPoint(0, -4), center + QPoint(0, 4));
+            p.drawRoundedRect(preview.adjusted(0, 0, -1, -1), 4, 4);
+            p.setFont(QFont(QStringLiteral("Segoe UI"), 9, QFont::DemiBold));
+            const QString hint = tr("+  Shift+click to add region");
+            const int hintWidth = std::min(width() - headerWidth,
+                p.fontMetrics().horizontalAdvance(hint) + 12);
+            QRect hintRect = preview;
+            if (preview.width() < hintWidth) {
+                // Keep the shortcut readable even when the region itself is
+                // too narrow. The translucent outline still shows its bounds.
+                const int left = std::clamp(preview.left(), headerWidth, width() - hintWidth);
+                hintRect = QRect(left, preview.top() + 6, hintWidth, p.fontMetrics().height() + 8);
+                p.setBrush(QColor("#263E53"));
+                p.drawRoundedRect(hintRect.adjusted(0, 0, -1, -1), 4, 4);
+            }
+            p.setPen(QColor("#F0F7FF"));
+            p.drawText(hintRect, Qt::AlignCenter,
+                       p.fontMetrics().elidedText(hint, Qt::ElideRight, std::max(0, hintRect.width() - 8)));
             p.restore();
         }
         drawRuler(p, measureMarks, x);
@@ -1080,7 +1100,7 @@ protected:
             const int row = (e->pos().y() - rulerHeight()) / laneHeight;
             if (row >= 0 && row < _file->numTracks()) {
                 QMenu menu(this);
-                const int createTick = emptyRegionStartTick(e->pos().x());
+                const int createTick = emptyRegionStartTick(row, e->pos().x());
                 auto *create = menu.addAction(tr("Add Empty Region Here"));
                 create->setEnabled(canEditQuantize() && emptyRegionDuration(row, createTick) > 0);
                 auto *paste = menu.addAction(withShortcut(tr("Paste Region at Playhead"), QStringLiteral("paste")));
@@ -1148,7 +1168,22 @@ protected:
             return;
         }
         const QPoint pos = e->position().toPoint();
+        update();
+        QToolTip::hideText();
         const int headerY = pos.y() - _rulerTop;
+        if (inPlayheadRuler(pos) && !MidiInput::recording()) {
+            setFocus(Qt::MouseFocusReason);
+            const int handleX = xForMs(_playheadMs >= 0 ? _playheadMs : _file->msOfTick(_file->cursorTick()));
+            const bool grabbedHandle = handleX >= headerWidth && handleX < width() &&
+                                       std::abs(pos.x() - handleX) <= 6;
+            _playheadDragOffset = grabbedHandle ? pos.x() - handleX : 0;
+            _playheadDragging = true;
+            _playheadDragX = pos.x();
+            setCursor(Qt::ClosedHandCursor);
+            if (!grabbedHandle) seekPlayheadAt(pos.x());
+            e->accept();
+            return;
+        }
         if (pos.x() < headerWidth && headerY >= 0 && headerY < measureRulerHeight) {
             if (pos.x() < 140) {
                 _showGlobalTracks = !_showGlobalTracks;
@@ -1187,13 +1222,13 @@ protected:
         } else {
             _tempoSelected = -1;
         }
-        if (e->modifiers().testFlag(Qt::ControlModifier) && canEditQuantize() &&
+        if ((e->modifiers().testFlag(Qt::ShiftModifier) ||
+             e->modifiers().testFlag(Qt::ControlModifier)) && canEditQuantize() &&
             pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight()) / laneHeight;
             if (row >= 0 && row < _file->numTracks() && !hitRegion(row, pos.x())) {
-                const int tick = emptyRegionStartTick(pos.x());
+                const int tick = emptyRegionStartTick(row, pos.x());
                 if (emptyRegionDuration(row, tick) > 0) {
-                    _emptyRegionButton = {};
                     setFocus(Qt::MouseFocusReason);
                     addEmptyRegion(row, tick);
                     e->accept();
@@ -1315,7 +1350,7 @@ protected:
                 return;
             }
         }
-        // Defer ruler seeks and lane deselection until release to distinguish panning.
+        // Defer lane deselection until release to distinguish panning.
         if (pos.x() >= headerWidth) {
             _timelinePressed = true;
             _dragging = false;
@@ -1330,12 +1365,16 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *e) override {
         const QPoint pos = e->position().toPoint();
+        if (_playheadDragging) {
+            updatePlayheadDrag(pos.x());
+            e->accept();
+            return;
+        }
         if (_tempoDrag != TempoDrag::None) {
             updateTempoDraft(pos);
             e->accept();
             return;
         }
-        updateEmptyRegionHover(pos, e->modifiers());
         if (_sectionPressed) {
             updateSectionDraft(pos.x());
             e->accept();
@@ -1363,12 +1402,6 @@ protected:
             QToolTip::showText(e->globalPosition().toPoint(),
                 tr("Drag empty space to name a section. Drag a section to move its regions. Right-click to rename or delete."),
                 this);
-            e->accept();
-            return;
-        }
-        if (!_emptyRegionButton.isEmpty()) {
-            setCursor(Qt::PointingHandCursor);
-            QToolTip::hideText();
             e->accept();
             return;
         }
@@ -1471,6 +1504,9 @@ protected:
                 else QToolTip::showText(e->globalPosition().toPoint(),
                               tr("Drag to move; Ctrl+drag to duplicate"), this);
             } else setCursor(Qt::OpenHandCursor);
+        } else if (inPlayheadRuler(pos) && !MidiInput::recording()) {
+            setCursor(Qt::OpenHandCursor);
+            QToolTip::showText(e->globalPosition().toPoint(), tr("Click or drag to move the playhead"), this);
         } else if (pos.x() >= headerWidth) {
             setCursor(Qt::PointingHandCursor);
         } else {
@@ -1480,6 +1516,14 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
+        update();
+        if (e->button() == Qt::LeftButton && _playheadDragging) {
+            updatePlayheadDrag(e->position().toPoint().x());
+            _playheadDragging = false;
+            unsetCursor();
+            e->accept();
+            return;
+        }
         if (e->button() == Qt::LeftButton && _tempoDrag != TempoDrag::None) {
             finishTempoDrag(e->position().toPoint());
             e->accept();
@@ -1742,6 +1786,26 @@ private:
     bool inCycleStrip(const QPoint &pos) const {
         return _file && pos.x() >= headerWidth &&
                pos.y() >= _rulerTop && pos.y() < _rulerTop + cycleStripHeight;
+    }
+
+    bool inPlayheadRuler(const QPoint &pos) const {
+        const int y = pos.y() - _rulerTop;
+        return _file && pos.x() >= headerWidth && pos.x() < width() &&
+               y >= cycleStripHeight && y < measureRulerHeight;
+    }
+
+    void seekPlayheadAt(int x) {
+        if (!_file || MidiInput::recording()) return;
+        const int boundedX = std::clamp(x, headerWidth, std::max(headerWidth, width() - 1));
+        const int ms = _originMs + static_cast<int>(std::lround((boundedX - headerWidth) / _scale));
+        if (seekTimeRequested) seekTimeRequested(ms);
+        else setCursorMs(ms);
+    }
+
+    void updatePlayheadDrag(int x) {
+        if (_playheadDragX == x) return;
+        _playheadDragX = x;
+        seekPlayheadAt(x - _playheadDragOffset);
     }
 
     void publishCycle() const {
@@ -2818,41 +2882,35 @@ private:
         _lastCopiedRegionId = id;
     }
 
-    QRect _emptyRegionButton;
+    std::optional<QPoint> _regionHoverGlobal;
 
-    void leaveEvent(QEvent *event) override {
-        _emptyRegionButton = {};
-        update();
-        QWidget::leaveEvent(event);
-    }
-
-    void updateEmptyRegionHover(const QPoint &pos, Qt::KeyboardModifiers modifiers) {
+    QRect emptyRegionPreviewAt(const QPoint &pos) const {
         QRect preview;
-        if (modifiers.testFlag(Qt::ControlModifier) && canEditQuantize() &&
-            !_timelinePressed && !_regionPressed && _cycleDrag == CycleDrag::None &&
+        if (canEditQuantize() && !_playheadDragging && !_timelinePressed &&
+            !_regionPressed && !_sectionPressed && _tempoDrag == TempoDrag::None &&
+            _cycleDrag == CycleDrag::None &&
             rect().contains(pos) && pos.x() >= headerWidth && isLaneY(pos.y())) {
             const int row = (pos.y() - rulerHeight()) / laneHeight;
             if (row < _file->numTracks() && !hitRegion(row, pos.x())) {
-                const int tick = emptyRegionStartTick(pos.x());
+                const int tick = emptyRegionStartTick(row, pos.x());
                 const int duration = emptyRegionDuration(row, tick);
                 if (duration > 0) {
                     const int left = std::max(headerWidth, xForMs(_file->msOfTick(tick)));
                     const int right = std::min(width(), xForMs(_file->msOfTick(tick + duration)));
-                    preview = QRect(left, rulerHeight() + row * laneHeight + 6,
-                                    std::max(1, right - left), laneHeight - 12);
+                    if (right > left)
+                        preview = QRect(left, rulerHeight() + row * laneHeight + 6,
+                                        right - left, laneHeight - 12);
                 }
             }
         }
-        if (_emptyRegionButton != preview) {
-            _emptyRegionButton = preview;
-            update();
-        }
+        return preview;
     }
 
-    int emptyRegionStartTick(int x) const {
+    int emptyRegionStartTick(int track, int x) const {
+        const int hover = timelineTickAt(x);
         int start = 0, end = 0;
-        _file->measure(timelineTickAt(x), &start, &end);
-        return start;
+        _file->measure(hover, &start, &end);
+        return xiv::emptyRegionGapStart(_regions, track, start, hover);
     }
 
     int emptyRegionDuration(int track, int tick) const {
@@ -3118,6 +3176,9 @@ private:
     bool _snapToGrid = false;
     bool _dragging = false;
     bool _timelinePressed = false;
+    bool _playheadDragging = false;
+    int _playheadDragOffset = 0;
+    int _playheadDragX = 0;
     bool _regionPressed = false;
     bool _regionDragging = false;
     RegionDragMode _dragMode = RegionDragMode::Move;
