@@ -2910,7 +2910,11 @@ private:
         const int hover = timelineTickAt(x);
         int start = 0, end = 0;
         _file->measure(hover, &start, &end);
-        return xiv::emptyRegionGapStart(_regions, track, start, hover);
+        for (const auto &region : _regions.regions()) {
+            if (region.trackIndex == track && region.endTick() <= hover)
+                start = std::max(start, region.endTick());
+        }
+        return start;
     }
 
     int emptyRegionDuration(int track, int tick) const {
