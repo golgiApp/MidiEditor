@@ -379,7 +379,6 @@ MainWindow::MainWindow(QString initFile)
     // QAction as View -> Show All Tracks, so every entry point stays in sync.
     QWidget *pianoHeader = new QWidget(matrixArea);
     pianoHeader->setObjectName(QStringLiteral("ffxivPianoHeader"));
-    pianoHeader->setFixedHeight(46);
     pianoHeader->setStyleSheet(QStringLiteral(
         "QWidget#ffxivPianoHeader { background:#222B37; border-bottom:1px solid #526173; }"
         "QWidget#ffxivPianoHeader QLabel { color:#F0F5FC; background:transparent; border:none; }"
@@ -391,9 +390,12 @@ MainWindow::MainWindow(QString initFile)
         "  border-color:#59ABF2; }"
         "QWidget#ffxivPianoHeader QToolButton:disabled { color:#8492A4;"
         "  background:#2D3745; border-color:#445164; }"));
-    auto *pianoHeaderLayout = new QHBoxLayout(pianoHeader);
-    pianoHeaderLayout->setContentsMargins(12, 3, 9, 3);
+    auto *pianoHeaderRows = new QVBoxLayout(pianoHeader);
+    pianoHeaderRows->setContentsMargins(12, 4, 9, 4);
+    pianoHeaderRows->setSpacing(4);
+    auto *pianoHeaderLayout = new QHBoxLayout;
     pianoHeaderLayout->setSpacing(6);
+    pianoHeaderRows->addLayout(pianoHeaderLayout);
     QLabel *pianoTitle = new QLabel(tr("PIANO ROLL"), pianoHeader);
     QFont titleFont = pianoTitle->font();
     titleFont.setBold(true);
@@ -401,10 +403,13 @@ MainWindow::MainWindow(QString initFile)
     pianoHeaderLayout->addWidget(pianoTitle);
     _pianoRollTrackLabel = new QLabel(tr("Select a track"), pianoHeader);
     _pianoRollTrackLabel->setStyleSheet(QStringLiteral("color:#C9D6E6; padding-left:12px;"));
-    pianoHeaderLayout->addWidget(_pianoRollTrackLabel);
-    pianoHeaderLayout->addStretch(1);
+    _pianoRollTrackLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    pianoHeaderLayout->addWidget(_pianoRollTrackLabel, 1);
 
-    pianoHeaderLayout->addWidget(new QLabel(tr("Grid"), pianoHeader));
+    auto *gridLayout = new QHBoxLayout;
+    gridLayout->setSpacing(6);
+    pianoHeaderRows->addLayout(gridLayout);
+    gridLayout->addWidget(new QLabel(tr("Grid"), pianoHeader));
     auto *gridButtons = new QButtonGroup(pianoHeader);
     using GridMode = xiv::PianoRollGridMode;
     const auto addGridButton = [&](GridMode mode, const QString &label, const QString &tooltip) {
@@ -415,7 +420,7 @@ MainWindow::MainWindow(QString initFile)
         button->setCheckable(true);
         gridButtons->addButton(button, static_cast<int>(mode));
         button->setChecked(mode == GridMode::Auto);
-        pianoHeaderLayout->addWidget(button);
+        gridLayout->addWidget(button);
     };
     addGridButton(GridMode::Auto, tr("Auto (recommended)"), tr("Automatically adjust the grid as you zoom"));
     addGridButton(GridMode::Quarter, tr("1/4"), tr("Show a fixed quarter-note grid"));
@@ -425,7 +430,7 @@ MainWindow::MainWindow(QString initFile)
         mw_matrixWidget->setPianoRollGridMode(static_cast<GridMode>(id));
         _matrixWidgetContainer->update();
     });
-    pianoHeaderLayout->addSpacing(8);
+    gridLayout->addStretch(1);
 
     _pianoRollShowSelectedButton = new QToolButton(pianoHeader);
     _pianoRollShowSelectedButton->setText(tr("Selected Region"));
@@ -3496,9 +3501,6 @@ void MainWindow::keyReleaseEvent(QKeyEvent *event) {
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
     if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
-        const auto *key = static_cast<QKeyEvent *>(event);
-        if (_arrangementWidget && key->key() == Qt::Key_Control && !key->isAutoRepeat())
-            _arrangementWidget->refreshRegionCreationPreview(event->type() == QEvent::KeyPress);
         // If piano emulation is active, we check if we should intercept the key
         if (matrixWidget() && matrixWidget()->isPianoEmulationEnabled()) {
             // Never intercept if a text input has focus
