@@ -1,5 +1,5 @@
 
-local MIDIEDITOR_RELEASE_VERSION_STRING = "0.3.0-preview"
+local MIDIEDITOR_RELEASE_VERSION_STRING = "0.3.6.1"
 
 -- Override uchardet package to use gitlab source instead of rate-limited freedesktop downloads
 package("uchardet")

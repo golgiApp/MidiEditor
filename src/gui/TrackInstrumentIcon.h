@@ -121,14 +121,15 @@ inline void drawTrackInstrumentIcon(QPainter &p, int program) {
     case 64: case 65: case 66: case 67: {
         p.rotate(-18);
         // S-shaped neck, long keyed body and a J-shaped bow.
-        shape.moveTo(5, -15);
-        shape.cubicTo(0, -18, -7, -17, -7, -11);
+        shape.moveTo(-15, -13);
+        shape.cubicTo(-12, -19, -5, -18, -5, -14);
+        shape.quadTo(-5, -12, -7, -10);
         shape.lineTo(-7, 7);
         shape.cubicTo(-7, 18, 8, 18, 8, 7);
         shape.lineTo(8, 2);
         p.setPen(QPen(ink, 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p.drawPath(shape);
-        p.drawLine(QPointF(4, -15.5), QPointF(8, -13.5));
+        p.drawLine(QPointF(-15, -13), QPointF(-17, -12));
         QPainterPath bell;
         bell.moveTo(6, 5);
         bell.cubicTo(6, 0, 4, -3, 3, -5);

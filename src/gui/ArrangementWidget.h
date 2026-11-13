@@ -253,7 +253,7 @@ public:
         if (scrollRangeChanged) scrollRangeChanged(maxMs, visibleTimeMs());
     }
     static constexpr int headerWidth = 326;
-    static constexpr int measureRulerHeight = 34;
+    static constexpr int measureRulerHeight = 44;
     static constexpr int sectionLaneHeight = 24;
     static constexpr int signatureLaneHeight = 24;
     static constexpr int tempoLaneHeight = 94;
@@ -1180,7 +1180,7 @@ protected:
             setFocus(Qt::MouseFocusReason);
             const int handleX = xForMs(_playheadMs >= 0 ? _playheadMs : _file->msOfTick(_file->cursorTick()));
             const bool grabbedHandle = handleX >= headerWidth && handleX < width() &&
-                                       std::abs(pos.x() - handleX) <= 6;
+                                       std::abs(pos.x() - handleX) <= playheadGrabRadius;
             _playheadDragOffset = grabbedHandle ? pos.x() - handleX : 0;
             _playheadDragging = true;
             _playheadDragX = pos.x();
@@ -1349,6 +1349,7 @@ protected:
                     _moveProposedTick = (_dragMode == RegionDragMode::TrimRight ||
                                          _dragMode == RegionDragMode::Loop) ?
                         r->endTick() : r->startTick;
+                    _edgeGrabOffsetX = pos.x() - xForMs(_file->msOfTick(_moveProposedTick));
                 }
                 refreshClickedRegionSelection(row);
                 e->accept();
@@ -1437,11 +1438,7 @@ protected:
             update();
         }
         if (_regionPressed && _moveRegionId > 0) {
-            const int horizontalDistance = std::abs(pos.x() - _movePressedX);
-            const int verticalDistance = _dragMode == RegionDragMode::Move
-                ? std::abs(pos.y() - _movePressedY) : 0;
-            if (!_regionDragging &&
-                std::max(horizontalDistance, verticalDistance) >= QApplication::startDragDistance()) {
+            if (!_regionDragging && regionDragStarted(pos)) {
                 _regionDragging = true;
                 if (_dragMode == RegionDragMode::Loop) setCursor(loopCursor());
                 else setCursor((_dragMode == RegionDragMode::TrimLeft ||
@@ -1562,11 +1559,11 @@ protected:
             return;
         }
         if (e->button() == Qt::LeftButton && _regionPressed) {
-            const bool drag = _regionDragging;
+            const QPoint pos = e->position().toPoint();
+            const bool drag = _regionDragging || regionDragStarted(pos);
             const int id = _moveRegionId;
             const bool group = groupRegionDrag();
-            if (drag && (_dragMode == RegionDragMode::Move || group))
-                updateRegionDragTarget(e->position().toPoint());
+            if (drag) updateRegionDragTarget(pos);
             const int targetTick = _moveProposedTick;
             const int releaseRow = (int(e->position().y()) - rulerHeight()) / laneHeight;
             _regionPressed = false;
@@ -1781,6 +1778,7 @@ private:
 
     enum class CycleDrag { None, Draw, Move, Left, Right };
     static constexpr int cycleStripHeight = 12;
+    static constexpr int playheadGrabRadius = 10;
     xiv::PlaybackCycle _cycle, _cycleDraft;
     CycleDrag _cycleDrag = CycleDrag::None;
     bool _cycleEnabled = false;
@@ -2372,7 +2370,9 @@ private:
             p.drawText(QRect(headerWidth + 12, 0, width() - headerWidth - 12, rulerHeight()),
                        Qt::AlignVCenter, tr("Open a MIDI file"));
         for (const auto &mark : marks)
-            p.drawText(mark.first + 5, 27, QString::number(mark.second));
+            p.drawText(QRect(mark.first + 7, cycleStripHeight, width() - mark.first - 7,
+                             measureRulerHeight - cycleStripHeight),
+                       Qt::AlignLeft | Qt::AlignVCenter, QString::number(mark.second));
         if (_file && _showGlobalTracks) {
             drawMeterAndTempo(p);
             for (int i = 0; i < _sections.size(); ++i)
@@ -2381,12 +2381,12 @@ private:
         }
         if (playheadX >= headerWidth && playheadX < width()) {
             p.setPen(QPen(QColor("#FFDD75"), 2));
-            p.drawLine(playheadX, cycleStripHeight + 8, playheadX, rulerHeight());
+            p.drawLine(playheadX, cycleStripHeight + 12, playheadX, rulerHeight());
             p.setPen(Qt::NoPen);
             p.setBrush(QColor("#FFDD75"));
-            p.drawPolygon(QPolygon{QPoint(playheadX - 5, cycleStripHeight),
-                                   QPoint(playheadX + 5, cycleStripHeight),
-                                   QPoint(playheadX, cycleStripHeight + 9)});
+            p.drawPolygon(QPolygon{QPoint(playheadX - 8, cycleStripHeight),
+                                   QPoint(playheadX + 8, cycleStripHeight),
+                                   QPoint(playheadX, cycleStripHeight + 13)});
         }
         p.restore();
     }
@@ -2550,12 +2550,28 @@ private:
             (_dragMode == RegionDragMode::Move || _dragMode == RegionDragMode::Loop);
     }
 
+    bool draggingRegionEdge() const {
+        return _dragMode == RegionDragMode::Loop || _dragMode == RegionDragMode::TrimLeft ||
+               _dragMode == RegionDragMode::TrimRight;
+    }
+
+    bool regionDragStarted(const QPoint &pos) const {
+        const int horizontal = std::abs(pos.x() - _movePressedX);
+        if (draggingRegionEdge()) return horizontal >= 2;
+        const int vertical = _dragMode == RegionDragMode::Move ? std::abs(pos.y() - _movePressedY) : 0;
+        return std::max(horizontal, vertical) >= QApplication::startDragDistance();
+    }
+
     void updateRegionDragTarget(const QPoint &pos) {
-        const int mouseTick = timelineTickAt(pos.x());
-        if (_dragMode != RegionDragMode::Move && _dragMode != RegionDragMode::Duplicate) {
-            _moveProposedTick = snapTick(mouseTick);
+        if (draggingRegionEdge()) {
+            if (_tutorialSnapTick >= 0 && snapTutorialTick(timelineTickAt(pos.x())) == _tutorialSnapTick) {
+                _moveProposedTick = _tutorialSnapTick;
+                return;
+            }
+            _moveProposedTick = snapTick(timelineTickAt(pos.x() - _edgeGrabOffsetX));
             return;
         }
+        const int mouseTick = timelineTickAt(pos.x());
         _moveProposedTick = snapTick(mouseTick - _moveOffsetTick);
         if (_dragMode != RegionDragMode::Move) return;
         _movePreviewRow = isLaneY(pos.y()) ? (pos.y() - rulerHeight()) / laneHeight : -1;
@@ -3200,6 +3216,7 @@ private:
     bool _deselectRegionOnClick = false;
     int _moveOffsetTick = 0;
     int _moveProposedTick = 0;
+    int _edgeGrabOffsetX = 0;
     int _dragX = 0;
     int _dragStartMs = 0;
     int _hoverTick = -1;

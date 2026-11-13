@@ -611,6 +611,8 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
             currentDivs.append(QPair<int, int>(xfrom, tick));
             measure++;
             int measureStartTick = tick;
+            const int beats = currentEvent->num();
+            const int beatDivision = 1 << std::clamp(currentEvent->denom(), 0, 15);
             tick += currentEvent->ticksPerMeasure();
             if (i < currentTimeSignatureEvents->length() - 1) {
                 if (currentTimeSignatureEvents->at(i + 1)->midiTime() <= tick) {
@@ -624,7 +626,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
             pixpainter->setPen(Qt::NoPen);
             pixpainter->drawRoundedRect(xfrom + 2, 29, xto - xfrom - 4, 15, 5, 5);
             if (tick > startTick) {
-                pixpainter->setPen(_cachedMeasureLineColor);
+                pixpainter->setPen(QPen(_cachedMeasureLineColor, 2));
                 // Extend measure lines from Y=25 through the marker gutter to height()
                 // This ensures they align with the ruler and grid
                 pixpainter->drawLine(xfrom, 25, xfrom, height());
@@ -658,6 +660,17 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
                     const int xDiv = xPosOfMs(msOfTick(divTick));
                     currentDivs.append(QPair<int, int>(xDiv, divTick));
                     pixpainter->drawLine(xDiv, timeHeight, xDiv, height());
+                }
+                const int64_t whole = 4LL * file->ticksPerQuarter();
+                pixpainter->setPen(QPen(_cachedMeasureLineColor.darker(135), 1));
+                int lastBeatX = xfrom;
+                for (int beat = 1; beat < beats; ++beat) {
+                    const auto beatTick = measureStartTick + beat * whole / beatDivision;
+                    if (beatTick >= tick) break;
+                    const int x = xPosOfMs(msOfTick(static_cast<int>(beatTick)));
+                    if (x - lastBeatX < 4 || xto - x < 4) continue;
+                    pixpainter->drawLine(x, timeHeight, x, height());
+                    lastBeatX = x;
                 }
                 pixpainter->setPen(oldPen);
             }
@@ -2170,6 +2183,7 @@ bool MatrixWidget::editSelectedNotes(const QString &command, int semitones) {
     const auto targets = _regionShowAll ? allTouchedRegions() : std::set<int>{focused->id};
     if (_regionShowAll && !xiv::materializeProjectedRegions(updated, _regionFullNotes, selection, file->numTracks()))
         return false;
+    std::set<std::pair<int, int>> transposedNotes;
     bool changed = false;
     for (int regionId : targets) {
         const auto *region = updated.find(regionId);
@@ -2185,6 +2199,7 @@ bool MatrixWidget::editSelectedNotes(const QString &command, int semitones) {
                     return false;
                 }
                 note.pitch = pitch;
+                transposedNotes.emplace(regionId, note.id);
                 changed = true;
             } else if (quantize && note.startTick >= region->sourceStartTick && note.startTick < region->sourceEndTick) {
                 const int tick = note.startTick + offset;
@@ -2211,6 +2226,17 @@ bool MatrixWidget::editSelectedNotes(const QString &command, int semitones) {
         semitones ? tr("Transpose Selected Notes") : tr("Filter Selected Chord Voices");
     if (_regionShowAll) commitProjectedRegions(std::move(updated), label);
     else commitRegionNotes(focused->id, *updated.find(focused->id)->ownedNotes, label);
+    // The commit refreshes the rendered notes and clears the selection.
+    // Match their owned IDs because pitch changes can reorder rendered notes.
+    if (!transposedNotes.empty()) {
+        for (const auto &note : _regionViewNotes) {
+            if (!transposedNotes.count({note.regionId, note.ownedNoteId})) continue;
+            if (_regionShowAll) _allSelection.insert(allNoteId(note));
+            else _regionSelection.insert(note.ownedNoteId);
+        }
+        if (_regionShowAll) updateAllTracksView();
+        else update();
+    }
     return true;
 }
 

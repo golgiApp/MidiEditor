@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Installer>
     <Name>XIV MIDI Studio</Name>
-    <Version>4.5.0</Version>
+    <Version>0.3.6.1</Version>
     <Title>XIV MIDI Studio</Title>
     <Publisher>golgiApp</Publisher>
     <ProductUrl>https://github.com/golgiApp/MidiEditor</ProductUrl>

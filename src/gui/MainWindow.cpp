@@ -406,9 +406,12 @@ MainWindow::MainWindow(QString initFile)
     _pianoRollTrackLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     pianoHeaderLayout->addWidget(_pianoRollTrackLabel, 1);
 
-    auto *gridLayout = new QHBoxLayout;
+    auto *gridControls = new QWidget(pianoHeader);
+    gridControls->setObjectName(QStringLiteral("xivPianoGridControls"));
+    auto *gridLayout = new QHBoxLayout(gridControls);
+    gridLayout->setContentsMargins(0, 0, 0, 0);
     gridLayout->setSpacing(6);
-    pianoHeaderRows->addLayout(gridLayout);
+    pianoHeaderRows->addWidget(gridControls, 0, Qt::AlignLeft);
     gridLayout->addWidget(new QLabel(tr("Grid"), pianoHeader));
     auto *gridButtons = new QButtonGroup(pianoHeader);
     using GridMode = xiv::PianoRollGridMode;
@@ -430,7 +433,6 @@ MainWindow::MainWindow(QString initFile)
         mw_matrixWidget->setPianoRollGridMode(static_cast<GridMode>(id));
         _matrixWidgetContainer->update();
     });
-    gridLayout->addStretch(1);
 
     _pianoRollShowSelectedButton = new QToolButton(pianoHeader);
     _pianoRollShowSelectedButton->setText(tr("Selected Region"));

@@ -9,16 +9,27 @@ XIV MIDI Studio brings Meowchestra’s MidiEditor features into a workspace insp
 
 ## Interactive tutorial
 
-In the **Startup** window, select **Start the interactive tutorial** to open the bundled *Mambo De Chocobo* project. The tutorial panel guides you through each edit and offers hints along the way.
+In the **Startup** window, select **Start the interactive tutorial** to open the bundled tutorial project. Floating instructions point to the controls you need and offer hints along the way.
 
-- Change a SoundFont instrument and turn the Flute melody into a Flute and Tuba duet by splitting, moving, looping, copying, trimming, and joining regions.
+- Turn a Flute melody into a duet by adding a Tuba track and arranging regions.
 - Use the Piano Roll and **GM Drum Map** to select notes by pitch, remove the open hi-hat hits, and transpose the Bass Drum notes.
-- Try Global Tracks, Piano Roll views, Undo and Redo, Arrangement zoom, mute and solo, and cycle playback.
+- Try Global Tracks, the Piano Roll views and grid options, and playback controls.
+
+## What's new in v0.3.6.1
+
+- **A clearer interactive tutorial.** Get oriented before editing, learn why the drum notes need to move into XIV’s playable range, and try the Piano Roll views and grid options.
+- **Easier Arrangement editing.** The taller measure ruler makes it easier to grab the playhead. Loop and trim handles respond to smaller drags and use the position where you release.
+- **A clearer Piano Roll grid.** Beat and measure lines stand out from subdivisions. Notes stay selected after transposing so you can adjust them again.
+
+## What's new in v0.3.6
+
+- **Bundled FFXIV SoundFont.** The Windows installer includes **FFXIV Standard** and loads it by default on a fresh setup.
+- **Instrument picker in the track header.** Click the instrument icon on the left to choose a preset. Track controls are grouped on the right.
 
 ## What's new in v0.3.5
 
 - **Track instruments.** Add Track applies the chosen SoundFont preset immediately. The instrument menu marks the track’s current preset with a checkmark.
-- **Region creation.** Click empty space to clear the region selection. Hold **Ctrl** over empty space to preview a new region, then click to create it at the start of the hovered measure. The region extends up to four measures and stops at the next region if it starts sooner.
+- **Region creation.** Hover over empty track space to preview a region, then **Shift+click** to add it. The region extends up to four measures and stops at the next region. A plain click clears the region selection.
 - **Group region edits.** Shift-click to select multiple regions, then drag any selected region to move them along their tracks together. Drag the upper-right loop handle of any selected region to extend their loops. Each loop stops at the next region on its track, while loops with more room continue to extend. Each drag is one undo step.
 - **Piano Roll editing.** Preview note moves and resizes as you drag. The **Grid** starts on **Auto (recommended)**. Use **Ctrl+mouse wheel** to zoom horizontally and reveal finer subdivisions, down to sixteenth notes. Choose **1/4**, **1/8**, or **1/16** for a fixed grid at any zoom level. A click adds a note one grid cell long, and dragging sets a different length. Right-click selected notes for editing commands, or press **Backspace** to delete them while keeping the region.
 
