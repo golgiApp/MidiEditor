@@ -42,7 +42,7 @@
 #include <QKeyEvent>
 #include <QTimer>
 #include <QLabel>
-#include <QProgressDialog>
+#include <QJsonObject>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QVBoxLayout>
@@ -116,7 +116,6 @@
 #include "VelocityDialog.h"
 #include "TweakTarget.h"
 #include "UpdateChecker.h"
-#include "UpdateManager.h"
 #include "UpdateAvailableDialog.h"
 
 #include "../tool/DeleteOverlapsTool.h"
@@ -211,7 +210,6 @@ MainWindow::MainWindow(QString initFile)
     _moveSelectedEventsToTrackMenu = 0;
     _toolbarWidget = nullptr;
     _updateChecker = nullptr;
-    _updateManager = new UpdateManager(this);
     _settingsDialog = nullptr;
     _silentUpdateCheck = false;
     
@@ -1780,13 +1778,7 @@ void MainWindow::performEarlyCleanup() {
         _miscWidget = nullptr;
     }
 
-    // Check for pending updates to apply after exit
-    if (_updateManager) {
-        _updateManager->applyUpdateAfterExit();
-    }
-
-    // Ensure our local settings cache doesn't overwrite the cleared update keys on destruction.
-    // This is critical for multi-instance scenarios where one instance clears the settings on disk.
+    // Clear updates queued by older builds, which used the upstream MidiEditor feed.
     if (_settings) {
         _settings->remove("updater/pending_update_file");
         _settings->remove("updater/is_installer");
@@ -6841,10 +6833,6 @@ QWidget *MainWindow::setupActions(QWidget *parent) {
     QAction *checkUpdatesAction = new QAction(tr("Check for Updates"), this);
     connect(checkUpdatesAction, &QAction::triggered, this, [this](){ checkForUpdates(false); });
     
-#ifndef QT_NO_DEBUG
-    QAction *testUpdateAction = helpMB->addAction(tr("Test Update System"));
-    connect(testUpdateAction, &QAction::triggered, this, &MainWindow::testUpdate);
-#endif
     helpMB->addAction(checkUpdatesAction);
 
     // Use full custom toolbar with settings integration
@@ -6986,46 +6974,15 @@ void MainWindow::magnetModeChanged() {
     _settings->sync();
 }
 
-#ifndef QT_NO_DEBUG
-void MainWindow::testUpdate() {
-    checkForUpdates(false, true);
-}
-#endif
-
-void MainWindow::checkForUpdates(bool silent, bool forceDialog) {
+void MainWindow::checkForUpdates(bool silent) {
     _silentUpdateCheck = silent;
     if (!_updateChecker) {
         _updateChecker = new UpdateChecker(this);
-        connect(_updateChecker, &UpdateChecker::updateAvailableData, this, [this](QString version, QJsonObject releaseData){
-            UpdateAvailableDialog dialog(version, QApplication::applicationVersion(), releaseData["body"].toString(), this);
-            int result = dialog.exec();
-            
-            if (result == UpdateAvailableDialog::UpdateNow) {
-                QProgressDialog *progress = new QProgressDialog(tr("Downloading update..."), tr("Cancel"), 0, 100, this);
-                progress->setWindowModality(Qt::WindowModal);
-                progress->setMinimumDuration(0);
-                progress->setAutoClose(true);
-                progress->show();
-
-                connect(_updateManager, &UpdateManager::downloadProgress, progress, [progress](qint64 received, qint64 total){
-                    if (total > 0) {
-                        progress->setValue(static_cast<int>((received * 100) / total));
-                    }
-                });
-
-                connect(_updateManager, &UpdateManager::updateError, this, [this, progress](QString error){
-                    progress->close();
-                    QMessageBox::warning(this, tr("Update Failed"), error);
-                });
-                _updateManager->startUpdate(releaseData, true);
-                connect(_updateManager, &UpdateManager::readyToExit, this, &MainWindow::close);
-            } else if (result == UpdateAvailableDialog::AfterExit) {
-                connect(_updateManager, &UpdateManager::updateError, this, [this](QString error){
-                    QMessageBox::warning(this, tr("Update Failed"), error);
-                });
-                _updateManager->startUpdate(releaseData, false);
-            } else if (result == UpdateAvailableDialog::Manual) {
-                QDesktopServices::openUrl(QUrl(releaseData["html_url"].toString()));
+        connect(_updateChecker, &UpdateChecker::updateAvailable, this,
+                [this](const QString &version, const QUrl &releaseUrl, const QString &releaseNotes) {
+            UpdateAvailableDialog dialog(version, QApplication::applicationVersion(), releaseNotes, this);
+            if (dialog.exec() == QDialog::Accepted) {
+                QDesktopServices::openUrl(releaseUrl);
             }
         });
         connect(_updateChecker, &UpdateChecker::noUpdateAvailable, this, [this](){
@@ -7041,7 +6998,7 @@ void MainWindow::checkForUpdates(bool silent, bool forceDialog) {
             }
         });
     }
-    _updateChecker->checkForUpdates(forceDialog);
+    _updateChecker->checkForUpdates();
 }
 
 void MainWindow::openConfig() {

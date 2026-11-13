@@ -146,7 +146,7 @@ void MainWindow::startTutorial() {
     outline->hide();
 
     const std::array<Prompt, static_cast<int>(Step::Done)> prompts{{
-        {tr("Welcome to the tutorial"), tr("This project starts with a Flute melody and a Bass Drum part. You’ll arrange the melody as a duet, then prepare the drum part for XIV Bard Performance."), {}},
+        {tr("Welcome to the tutorial"), tr("This project starts as a duet for Flute and Bass Drum. You’ll add a Tuba part to turn it into a trio, then prepare the drum part for XIV Bard Performance."), {}},
         {tr("Find your way around"), tr("The Arrangement above holds tracks and regions. The Piano Roll below shows the notes in a region when you select it."), {}},
         {tr("Add a Tuba track"), tr("Click + Add Track. In the Add Track dialog, click the preset button beside Track Name, choose Tuba, then click Accept."),
          tr("Look under Brass or the loaded SoundFont's name. Choose the preset so the track gets the Tuba sound.")},
@@ -170,7 +170,7 @@ void MainWindow::startTutorial() {
          tr("Both regions should be highlighted before you open the menu. The silence between them stays in the joined region.")},
         {tr("Return to measure 1"), tr("Click Back to Beginning in the transport controls."),
          tr("When playback is stopped, the button immediately to the left of Play goes to the beginning.")},
-        {tr("Listen to your duet"), tr("Click Play. Listen for Flute at measure 5 and Tuba returning at measure 21. Click Continue when ready."),
+        {tr("Preview the Flute and Tuba"), tr("Click Play. Listen for Flute at measure 5 and Tuba returning at measure 21. Click Continue when ready."),
          tr("The Bass Drum is muted for this preview.")},
         {tr("Open the Bass Drum region"), tr("Click the Bass Drum region in the Arrangement to show its notes in the Piano Roll."),
          tr("The Bass Drum track is between Flute and Tuba.")},
@@ -182,7 +182,7 @@ void MainWindow::startTutorial() {
          tr("Drag from the highest remaining key to the lowest to select both rows across the entire region.")},
         {tr("Transpose up again"), tr("Right-click a selected note and choose Transpose Selected Notes > Octave Up again."),
          tr("The notes stay selected after transposing. The second octave shift brings both pitches into XIV’s playable range.")},
-        {tr("Hear the Bass Drum"), tr("The Bass Drum is unmuted. Click Play to hear the adjusted part, then click Continue."),
+        {tr("Hear the Bass Drum"), tr("The Bass Drum is unmuted. Click Play to hear the full trio, then click Continue."),
          tr("The GM pitches were too low for the XIV part. Transposing the remaining notes puts them in range.")},
         {tr("Arrangement and Tempo"), tr("Global Tracks above the track headers opens the Tempo lane, where you can see changes in speed."), {}},
         {tr("Piano Roll views"), tr("All Tracks shows notes from every track together, like most versions of MidiEditor. Selected Region shows only the region you clicked, so you can focus on one instrument."), {}},

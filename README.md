@@ -11,7 +11,7 @@ XIV MIDI Studio brings Meowchestra’s MidiEditor features into a workspace insp
 
 In the **Startup** window, select **Start the interactive tutorial** to open the bundled tutorial project. Floating instructions point to the controls you need and offer hints along the way.
 
-- Turn a Flute melody into a duet by adding a Tuba track and arranging regions.
+- Turn a Flute and Bass Drum duet into a trio by adding a Tuba part.
 - Use the Piano Roll and **GM Drum Map** to select notes by pitch, remove the open hi-hat hits, and transpose the Bass Drum notes.
 - Try Global Tracks, the Piano Roll views and grid options, and playback controls.
 

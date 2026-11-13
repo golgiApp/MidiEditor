@@ -4,10 +4,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QUrl>
-#include <QDesktopServices>
 #include <QApplication>
-#include <QToolButton>
 #include <QRegularExpression>
 #include <QStyle>
 
@@ -61,7 +58,7 @@ UpdateAvailableDialog::UpdateAvailableDialog(const QString &latestVersion, const
     cleanBody.replace(QRegularExpression("(?<!\\\\)_(.+?)(?<!\\\\)_"), "*\\1*");
     
     if (cleanBody.trimmed().isEmpty()) {
-        cleanBody = tr("### Release Notes\n* Performance improvements and bug fixes\n* User interface refinements\n* Stability enhancements");
+        cleanBody = tr("Release notes are available on GitHub.");
     }
 
     // Parse into collapsible sections
@@ -135,37 +132,18 @@ UpdateAvailableDialog::UpdateAvailableDialog(const QString &latestVersion, const
     scrollArea->setMinimumHeight(200);
     mainLayout->addWidget(scrollArea, 1);
 
-    QLabel *linkAction = new QLabel(QString("<a href='https://github.com/Meowchestra/MidiEditor/blob/main/CHANGELOG.md' style='text-decoration: none;'>View full changelog on GitHub</a>"), this);
-    linkAction->setOpenExternalLinks(true);
-    linkAction->setStyleSheet("font-size: 12px; margin-bottom: 10px;");
-    mainLayout->addWidget(linkAction);
-
-    // Buttons (using standard theme styling)
     QHBoxLayout *buttonLayout = new QHBoxLayout();
     buttonLayout->setSpacing(12);
 
-    QPushButton *btnNow = new QPushButton(tr("Update Now"), this);
-    QPushButton *btnLater = new QPushButton(tr("After Exit"), this);
-    QPushButton *btnManual = new QPushButton(tr("Manual"), this);
-    QPushButton *btnClose = new QPushButton(tr("Close"), this);
+    QPushButton *releaseButton = new QPushButton(tr("Open Release on GitHub"), this);
+    QPushButton *closeButton = new QPushButton(tr("Close"), this);
+    closeButton->setDefault(true);
 
-    btnNow->setDefault(true);
-
-    buttonLayout->addWidget(btnNow);
-    buttonLayout->addWidget(btnLater);
-    buttonLayout->addWidget(btnManual);
+    buttonLayout->addWidget(releaseButton);
     buttonLayout->addStretch();
-    buttonLayout->addWidget(btnClose);
-
+    buttonLayout->addWidget(closeButton);
     mainLayout->addLayout(buttonLayout);
 
-    connect(btnNow, &QPushButton::clicked, this, &UpdateAvailableDialog::onUpdateNow);
-    connect(btnLater, &QPushButton::clicked, this, &UpdateAvailableDialog::onAfterExit);
-    connect(btnManual, &QPushButton::clicked, this, &UpdateAvailableDialog::onManual);
-    connect(btnClose, &QPushButton::clicked, this, &UpdateAvailableDialog::onClose);
+    connect(releaseButton, &QPushButton::clicked, this, &QDialog::accept);
+    connect(closeButton, &QPushButton::clicked, this, &QDialog::reject);
 }
-
-void UpdateAvailableDialog::onUpdateNow() { done(UpdateNow); }
-void UpdateAvailableDialog::onAfterExit() { done(AfterExit); }
-void UpdateAvailableDialog::onManual() { done(Manual); }
-void UpdateAvailableDialog::onClose() { done(Close); }
