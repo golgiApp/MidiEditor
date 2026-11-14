@@ -22,6 +22,7 @@ struct Note {
     int pitch;         // 0..127
     std::int64_t startTick;
     std::string trackName;
+    std::int64_t endTick = 0;
 };
 
 inline bool isDrum(const Note& n) {
@@ -40,7 +41,8 @@ inline bool isDrum(const Note& n) {
 // group, and must belong to the same track AND channel.
 inline std::set<std::uint64_t> deletionIds(const std::vector<Note>& notes,
                                            Mode mode,
-                                           std::int64_t toleranceTicks = 0) {
+                                           std::int64_t toleranceTicks = 0,
+                                           bool includeOverlaps = false) {
     if (toleranceTicks < 0) toleranceTicks = 0;
     std::map<std::pair<int,int>, std::vector<const Note*>> buckets;
     for (const auto& n : notes) {
@@ -52,6 +54,30 @@ inline std::set<std::uint64_t> deletionIds(const std::vector<Note>& notes,
             return std::tie(a->startTick, a->pitch, a->id) <
                    std::tie(b->startTick, b->pitch, b->id);
         });
+        if (includeOverlaps && mode == Mode::KeepHighest) {
+            const auto lowerVoice = [](const Note *a, const Note *b) {
+                if (a->pitch != b->pitch) return a->pitch < b->pitch;
+                return a->id < b->id;
+            };
+            using Voice = const Note *;
+            std::set<Voice, decltype(lowerVoice)> active(lowerVoice);
+            std::multimap<std::int64_t, Voice> endings;
+            for (const auto *note : group) {
+                while (!endings.empty() && endings.begin()->first <= note->startTick) {
+                    active.erase(endings.begin()->second);
+                    endings.erase(endings.begin());
+                }
+                if (note->endTick <= note->startTick) continue;
+                const Voice voice = note;
+                active.insert(voice);
+                endings.emplace(note->endTick, voice);
+                // Each lower voice only needs to be marked once.
+                while (active.size() > 1) {
+                    result.insert((*active.begin())->id);
+                    active.erase(active.begin());
+                }
+            }
+        }
         for (std::size_t i = 0; i < group.size();) {
             const auto anchor = group[i]->startTick;
             std::size_t j = i + 1;

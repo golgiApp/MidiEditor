@@ -1,9 +1,36 @@
 #include "../src/support/ChordVoiceFilter.h"
+#include "../src/region/MidiRegionTransfer.h"
 #include <cassert>
 #include <iostream>
 #include <set>
 using namespace FfxivVoice;
+static void testJoinedRegion() {
+    for (int offset : {0, 5}) {
+        xiv::MidiRegionModel model;
+        const int trumpet = model.addInitial(0, 0, 480);
+        const int horn = model.addInitial(1, 0, 480);
+        const std::vector<xiv::SourceRegionNote> source{
+            {1, 0, 100, 200, 72, 90, 0},
+            {2, 1, 100 + offset, 210, 60, 90, 3}};
+        assert(xiv::consolidateRegions(model, {trumpet, horn}, trumpet, 0, 0, 0, 2, source));
+        const auto *joined = model.find(trumpet);
+        assert(joined && joined->ownedNotes && joined->ownedNotes->size() == 2);
+        assert(xiv::consolidateRegions(model, {trumpet}, trumpet, 0, 0, -1, 2, {}));
+        std::vector<FfxivVoice::Note> voices;
+        for (const auto &note : *model.find(trumpet)->ownedNotes) {
+            assert(note.channel == 0);
+            voices.push_back({static_cast<std::uint64_t>(note.id), 0, note.channel,
+                              note.pitch, note.startTick, "Trumpet", note.endTick});
+        }
+        const auto removed = FfxivVoice::deletionIds(voices, FfxivVoice::Mode::KeepHighest, 0, true);
+        assert(removed.size() == 1u);
+        for (const auto &note : voices) if (removed.count(note.id)) assert(note.pitch == 60);
+        std::cout << "Joined note onset difference " << offset << ": removed " << removed.size() << '\n';
+    }
+}
+
 int main() {
+    testJoinedRegion();
     std::vector<Note> notes = {
         {1,1,3,60,100,"CLEAN GTR"}, {2,1,3,64,100,"CLEAN GTR"},
         {3,1,3,67,100,"CLEAN GTR"}, {4,1,3,71,100,"CLEAN GTR"},

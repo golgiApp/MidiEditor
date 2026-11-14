@@ -2803,9 +2803,9 @@ private:
         std::vector<FfxivVoice::Note> voices;
         for (const auto &note : notes)
             voices.push_back({static_cast<std::uint64_t>(note.id), region->trackIndex,
-                              note.channel, note.pitch, note.startTick, name});
+                              note.channel, note.pitch, note.startTick, name, note.endTick});
         const auto removed = FfxivVoice::deletionIds(voices, mode,
-            chordVoiceTolerance ? chordVoiceTolerance() : 0);
+            chordVoiceTolerance ? chordVoiceTolerance() : 0, true);
         if (removed.empty()) return;
         notes.erase(std::remove_if(notes.begin(), notes.end(), [&](const auto &note) {
             return removed.count(static_cast<std::uint64_t>(note.id)) != 0;
