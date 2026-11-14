@@ -1,6 +1,6 @@
 # XIV MIDI Studio
 
-<img width="2544" height="1352" alt="image" src="https://github.com/user-attachments/assets/ee4be632-81df-4fd0-99f2-7656ecacfb74" />
+![XIV MIDI Studio showing two selected Arrangement regions in the Piano Roll](docs/images/xiv-midi-studio.png)
 
 
 **Arrange like a producer with XIV MIDI Studio, a MIDI-focused digital audio workstation built for Final Fantasy XIV Bard Performance.**
@@ -14,6 +14,11 @@ In the **Startup** window, select **Start the interactive tutorial** to open the
 - Turn a Flute and Bass Drum duet into a trio by adding a Tuba part.
 - Use the Piano Roll and **GM Drum Map** to select notes by pitch, remove the open hi-hat hits, and transpose the Bass Drum notes.
 - Try Global Tracks, the Piano Roll views and grid options, and playback controls.
+
+## What's new in v0.3.6.2
+
+- **View multiple regions in the Piano Roll.** Select regions in the Arrangement, including across tracks, to see their notes together at their song positions and in their track colors. The Piano Roll button reads **Selected Region** for one region and **Selected Regions** for multiple.
+- **Maximized startup.** XIV MIDI Studio opens maximized when launched from the app shortcut or by opening a MIDI file directly.
 
 ## What's new in v0.3.6.1
 
