@@ -1005,13 +1005,16 @@ MainWindow::MainWindow(QString initFile)
         // MIDI notes (which may be shared by copied/looped regions).
         EventTool::clearSelection();
         const int regionId = _arrangementWidget->selectedRegionId();
-        mw_matrixWidget->setRegionView(_arrangementWidget->regionModel(), regionId,
+        const auto regionIds = _arrangementWidget->selectedRegionIds();
+        _pianoRollShowSelectedButton->setText(
+            regionIds.size() > 1 ? tr("Selected Regions") : tr("Selected Region"));
+        mw_matrixWidget->setRegionView(_arrangementWidget->regionModel(), regionId, regionIds,
                                        _showAllTracksInPianoRoll, true);
         if (_pianoRollTrackLabel) {
             if (_showAllTracksInPianoRoll)
                 _pianoRollTrackLabel->setText(tr("All Regions"));
             else
-                _pianoRollTrackLabel->setText(_arrangementWidget->selectedRegionName());
+                _pianoRollTrackLabel->setText(_arrangementWidget->pianoRollSelectionName());
         }
         if (_matrixWidgetContainer) _matrixWidgetContainer->update();
     };
@@ -5074,7 +5077,7 @@ void MainWindow::editTrack(int i, bool assign) {
         if (_showAllTracksInPianoRoll)
             _pianoRollTrackLabel->setText(tr("All Regions"));
         else if (_arrangementWidget)
-            _pianoRollTrackLabel->setText(_arrangementWidget->selectedRegionName());
+            _pianoRollTrackLabel->setText(_arrangementWidget->pianoRollSelectionName());
         else
             _pianoRollTrackLabel->setText(tr("Select a region"));
     }

@@ -875,7 +875,7 @@ void MatrixWidget::paintEvent(QPaintEvent *event) {
         painter->setBrush(Qt::NoBrush);
         for (const auto &n : _regionViewNotes) {
             const int id = n.ownedNoteId ? n.ownedNoteId : n.sourceId;
-            const bool selected = _regionShowAll ? _allSelection.count(allNoteId(n))
+            const bool selected = allTracksEditing() ? _allSelection.count(allNoteId(n))
                                                  : _regionSelection.count(id);
             if (_regionEditingSafe && !selected) continue;
             const int line = 127 - n.pitch;
@@ -1422,6 +1422,7 @@ void MatrixWidget::setFile(MidiFile *f) {
     _regionViewEnabled = false;
     _regionEditingSafe = false;
     _selectedViewRegionId = 0;
+    _selectedViewRegionIds.clear();
 
     scaleX = 1;
     scaleY = 1;
@@ -1508,9 +1509,11 @@ MidiFile *MatrixWidget::midiFile() {
 // Display the selected region by default. Region note gestures use the
 // rendered positions and commit a region-local snapshot.
 void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
-                                 int selectedRegionId, bool showAllRegions,
+                                 int selectedRegionId, const std::set<int> &selectedRegionIds,
+                                 bool showAllRegions,
                                  bool navigate) {
     const bool changedSelection = _selectedViewRegionId != selectedRegionId ||
+                                  _selectedViewRegionIds != selectedRegionIds ||
                                   _regionShowAll != showAllRegions;
     if (changedSelection) {
         _regionSelection.clear();
@@ -1520,13 +1523,14 @@ void MatrixWidget::setRegionView(const xiv::MidiRegionModel &model,
     _regionGesture = RegionGesture::None;
     _regionViewModel = model;
     _selectedViewRegionId = selectedRegionId;
+    _selectedViewRegionIds = selectedRegionIds;
     _regionShowAll = showAllRegions;
     _regionViewEnabled = true;
     const auto *focusedRegion = _regionViewModel.find(selectedRegionId);
     // Existing native edit tools remain enabled where their source note
     // positions still equal the arranged display. Transformed/looped regions
     // need dedicated region-note IDs before editing may safely be enabled.
-    _regionEditingSafe = !_regionShowAll && focusedRegion && !focusedRegion->ownedNotes &&
+    _regionEditingSafe = !allTracksEditing() && focusedRegion && !focusedRegion->ownedNotes &&
         focusedRegion->startTick == focusedRegion->sourceStartTick &&
         focusedRegion->loopLengthTicks == 0 && !focusedRegion->quantize.active() &&
         focusedRegion->endNoteMode == xiv::CrossingNoteMode::Keep &&
@@ -1582,7 +1586,7 @@ void MatrixWidget::refreshRegionViewNotes() {
     _regionFullNotes = xiv::renderRegionNotes(source, _regionViewModel);
     for (std::size_t i = 0; i < _regionFullNotes.size(); ++i) {
         const auto &note = _regionFullNotes[i];
-        if (!_regionShowAll && note.regionId != _selectedViewRegionId) continue;
+        if (!_regionShowAll && !_selectedViewRegionIds.count(note.regionId)) continue;
         if (note.trackIndex < 0 || note.trackIndex >= file->numTracks() ||
             file->track(note.trackIndex)->hidden() ||
             !ChannelVisibilityManager::instance().isChannelVisible(note.channel)) continue;
@@ -1597,7 +1601,7 @@ void MatrixWidget::refreshRegionViewNotes() {
 }
 
 const xiv::MidiRegion *MatrixWidget::editableRegion() const {
-    if (!file || !enabled || !_regionViewEnabled || _regionShowAll ||
+    if (!file || !enabled || !_regionViewEnabled || allTracksEditing() ||
         !commitRegionNotes || MidiPlayer::isPlaying() || MidiInput::recording()) return nullptr;
     const auto *region = _regionViewModel.find(_selectedViewRegionId);
     return region && !region->loopLengthTicks ? region : nullptr;
@@ -1776,6 +1780,19 @@ std::optional<xiv::MidiRegionModel> MatrixWidget::allTracksGestureDraft(
         const int start = noteEntryBounds(_allPressPoint, point, std::numeric_limits<int>::max()).first;
         auto updated = _regionViewModel;
         const auto *region = updated.at(trackIndex, start);
+        if (!_regionShowAll) {
+            // A selected-region edit must land inside one of the visible regions,
+            // including when an unselected region overlaps it.
+            region = nullptr;
+            for (auto it = updated.regions().rbegin(); it != updated.regions().rend(); ++it) {
+                if (it->trackIndex == trackIndex && it->contains(start) &&
+                    _selectedViewRegionIds.count(it->id)) {
+                    region = &*it;
+                    break;
+                }
+            }
+            if (!region) return std::nullopt;
+        }
         int id;
         if (region) {
             id = region->id;
@@ -2047,17 +2064,17 @@ static QList<QKeySequence> noteBindings(const QString &id) {
 }
 
 int MatrixWidget::selectedNoteId(const xiv::RenderedRegionNote &note) const {
-    const int id = _regionShowAll ? allNoteId(note) :
+    const int id = allTracksEditing() ? allNoteId(note) :
         (note.ownedNoteId ? note.ownedNoteId : note.sourceId);
-    return (_regionShowAll ? _allSelection : _regionSelection).count(id) ? id : 0;
+    return (allTracksEditing() ? _allSelection : _regionSelection).count(id) ? id : 0;
 }
 
 QString MatrixWidget::noteShortcut(const QKeyEvent *event) const {
     if (!_regionViewEnabled || (!hasFocus() && !(parentWidget() && parentWidget()->hasFocus())))
         return {};
-    const auto &selection = _regionShowAll ? _allSelection : _regionSelection;
+    const auto &selection = allTracksEditing() ? _allSelection : _regionSelection;
     const QKeySequence key(event->keyCombination());
-    if (_regionShowAll) {
+    if (allTracksEditing()) {
         for (const auto *id : {"select_all", "paste"})
             if (noteBindings(QString::fromLatin1(id)).contains(key)) return QString::fromLatin1(id);
     }
@@ -2137,13 +2154,13 @@ void MatrixWidget::runNoteCommand(const QString &command) {
     if (command == QStringLiteral("copy")) { copyProjectedNotes(); return; }
     if (command == QStringLiteral("xiv_note_cut") && !copyProjectedNotes()) return;
     if (command == QStringLiteral("delete") || command == QStringLiteral("xiv_note_cut")) {
-        if (_regionShowAll) deleteAllTracksSelection();
+        if (allTracksEditing()) deleteAllTracksSelection();
         else deleteRegionSelection();
         return;
     }
     if (command == QStringLiteral("xiv_note_legato") || command == QStringLiteral("xiv_note_overlaps")) {
         const bool overlaps = command == QStringLiteral("xiv_note_overlaps");
-        if (_regionShowAll) adjustAllTracksEnds(overlaps);
+        if (allTracksEditing()) adjustAllTracksEnds(overlaps);
         else adjustSelectedRegionNoteEnds(overlaps);
         return;
     }
@@ -2161,8 +2178,8 @@ void MatrixWidget::runNoteCommand(const QString &command) {
 
 bool MatrixWidget::editSelectedNotes(const QString &command, int semitones) {
     const auto *focused = editableRegion();
-    const auto &selection = _regionShowAll ? _allSelection : _regionSelection;
-    if (selection.empty() || (_regionShowAll ? !canEditAllTracks() : !focused)) return false;
+    const auto &selection = allTracksEditing() ? _allSelection : _regionSelection;
+    if (selection.empty() || (allTracksEditing() ? !canEditAllTracks() : !focused)) return false;
 
     const bool quantize = command == QStringLiteral("quantize");
     std::set<std::uint64_t> remove;
@@ -2180,15 +2197,15 @@ bool MatrixWidget::editSelectedNotes(const QString &command, int semitones) {
     } else if (!quantize && !semitones) return false;
 
     auto updated = _regionViewModel;
-    const auto targets = _regionShowAll ? allTouchedRegions() : std::set<int>{focused->id};
-    if (_regionShowAll && !xiv::materializeProjectedRegions(updated, _regionFullNotes, selection, file->numTracks()))
+    const auto targets = allTracksEditing() ? allTouchedRegions() : std::set<int>{focused->id};
+    if (allTracksEditing() && !xiv::materializeProjectedRegions(updated, _regionFullNotes, selection, file->numTracks()))
         return false;
     std::set<std::pair<int, int>> transposedNotes;
     bool changed = false;
     for (int regionId : targets) {
         const auto *region = updated.find(regionId);
         if (!region) continue;
-        auto notes = _regionShowAll ? *region->ownedNotes : regionNotesForEdit(*focused);
+        auto notes = allTracksEditing() ? *region->ownedNotes : regionNotesForEdit(*focused);
         const int offset = region->startTick - region->sourceStartTick;
         for (auto &note : notes) {
             if (!selection.count(note.id)) continue;
@@ -2224,17 +2241,17 @@ bool MatrixWidget::editSelectedNotes(const QString &command, int semitones) {
     if (!changed) return false;
     const auto label = quantize ? tr("Quantize Selected Notes") :
         semitones ? tr("Transpose Selected Notes") : tr("Filter Selected Chord Voices");
-    if (_regionShowAll) commitProjectedRegions(std::move(updated), label);
+    if (allTracksEditing()) commitProjectedRegions(std::move(updated), label);
     else commitRegionNotes(focused->id, *updated.find(focused->id)->ownedNotes, label);
     // The commit refreshes the rendered notes and clears the selection.
     // Match their owned IDs because pitch changes can reorder rendered notes.
     if (!transposedNotes.empty()) {
         for (const auto &note : _regionViewNotes) {
             if (!transposedNotes.count({note.regionId, note.ownedNoteId})) continue;
-            if (_regionShowAll) _allSelection.insert(allNoteId(note));
+            if (allTracksEditing()) _allSelection.insert(allNoteId(note));
             else _regionSelection.insert(note.ownedNoteId);
         }
-        if (_regionShowAll) updateAllTracksView();
+        if (allTracksEditing()) updateAllTracksView();
         else update();
     }
     return true;
@@ -2245,7 +2262,7 @@ bool MatrixWidget::beginRegionGesture(QMouseEvent *event) {
     if (!_regionViewEnabled || point.x() < lineNameWidth || point.y() < timeHeight ||
         lineAtY(point.y()) < 0 || lineAtY(point.y()) > 127) return false;
     if (!editableRegion()) {
-        if (_selectedViewRegionId && !_regionShowAll && !MidiPlayer::isPlaying() && !MidiInput::recording())
+        if (_selectedViewRegionId && !allTracksEditing() && !MidiPlayer::isPlaying() && !MidiInput::recording())
             QToolTip::showText(event->globalPosition().toPoint(),
                 tr("Remove the loop extension to edit these notes in this view."), this);
         return true;
@@ -2421,7 +2438,7 @@ void MatrixWidget::refreshNotePreview(const QPoint &point) {
     std::set<int> ids;
     int addedRegion = 0;
     std::optional<xiv::MidiRegionModel> draft;
-    if (_regionShowAll) {
+    if (allTracksEditing()) {
         draft = allTracksGestureDraft(_allGesture, point, ids, addedRegion);
     } else if (const auto *region = editableRegion()) {
         auto notes = regionGestureDraft(*region, _regionGesture, point);
@@ -2436,7 +2453,7 @@ void MatrixWidget::refreshNotePreview(const QPoint &point) {
         }
     }
     if (draft) {
-        const auto touched = _regionShowAll ? allTouchedRegions() : std::set<int>{_selectedViewRegionId};
+        const auto touched = allTracksEditing() ? allTouchedRegions() : std::set<int>{_selectedViewRegionId};
         for (const auto &note : xiv::renderRegionNotes({}, *draft))
             if ((addedRegion ? note.regionId == addedRegion : touched.count(note.regionId)) &&
                 ids.count(note.ownedNoteId))

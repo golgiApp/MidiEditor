@@ -19,6 +19,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QSurfaceFormat>
+#include <QScreen>
 #include <QOpenGLContext>
 
 #include "gui/MainWindow.h"
@@ -202,7 +203,7 @@ int main(int argc, char *argv[]) {
         qDebug() << "Skipping OpenGL initialization - using software rendering";
     }
 
-    a.setApplicationVersion("0.3.6.1");
+    a.setApplicationVersion("0.3.6.2");
     a.setApplicationName("XIV MIDI Studio");
     a.setQuitOnLastWindowClosed(true);
 
@@ -224,6 +225,8 @@ int main(int argc, char *argv[]) {
         w = new MainWindow(argv[1]);
     else
         w = new MainWindow();
+    if (const auto *screen = w->screen())
+        w->setGeometry(screen->availableGeometry());
     w->showMaximized();
     return a.exec();
 }

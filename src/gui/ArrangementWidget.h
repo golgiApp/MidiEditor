@@ -114,6 +114,16 @@ public:
     const xiv::MidiRegionModel &regionModel() const { return _regions; }
     MidiFile *midiFile() const { return _file.data(); }
     int selectedRegionId() const { return _selectedRegionId; }
+    std::set<int> selectedRegionIds() const {
+        auto ids = _selectedRegionIds;
+        if (_selectedRegionId) ids.insert(_selectedRegionId);
+        return ids;
+    }
+    QString pianoRollSelectionName() const {
+        const auto count = selectedRegionIds().size();
+        return count > 1 ? tr("%1 regions selected").arg(static_cast<int>(count))
+                         : selectedRegionName();
+    }
     int lastCopiedRegionId() const { return _lastCopiedRegionId; }
     void clearRegionSelection() {
         const bool hadSelection = _selectedRegionId || !_selectedRegionIds.empty();

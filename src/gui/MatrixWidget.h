@@ -122,11 +122,11 @@ public:
     // Do not use source-event hit testing on moved/looped note positions.
     std::function<void(int, std::vector<xiv::OwnedRegionNote>, const QString &)> commitRegionNotes;
     void setRegionView(const xiv::MidiRegionModel &model, int selectedRegionId,
-                       bool showAllRegions, bool navigate = false);
+                       const std::set<int> &selectedRegionIds, bool showAllRegions, bool navigate = false);
     void refreshRegionViewNotes();
     void setPianoRollGridMode(xiv::PianoRollGridMode mode);
     std::function<void(xiv::MidiRegionModel, const QString &)> commitProjectedRegions;
-    bool allTracksEditing() const { return _regionViewEnabled && _regionShowAll; }
+    bool allTracksEditing() const { return _regionViewEnabled && (_regionShowAll || _selectedViewRegionIds.size() > 1); }
     bool hasAllTracksSelection() const { return !_allSelection.empty(); }
     void allTracksSelectAll();
     bool allTracksDelete() { return deleteAllTracksSelection(); }
@@ -753,6 +753,7 @@ private:
     xiv::MidiRegionModel _regionViewModel;
     std::vector<xiv::RenderedRegionNote> _regionViewNotes;
     int _selectedViewRegionId = 0;
+    std::set<int> _selectedViewRegionIds;
     bool _regionViewEnabled = false;
     bool _regionShowAll = false;
     bool _showMidiEventLanes = false;
